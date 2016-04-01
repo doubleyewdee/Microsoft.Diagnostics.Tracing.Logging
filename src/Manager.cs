@@ -202,7 +202,7 @@ namespace Microsoft.Diagnostics.Tracing.Logging
                                                     bool fileTimestampLocal = false)
         {
             return singleton.CreateFileLogger(LoggerType.TextLogFile, name, directory, bufferSizeMB, rotation,
-                                              filenameTemplate, fileTimestampLocal);
+                                              filenameTemplate, fileTimestampLocal, TimeSpan.Zero, 0);
         }
 
         /// <summary>
@@ -227,7 +227,7 @@ namespace Microsoft.Diagnostics.Tracing.Logging
                                                    bool fileTimestampLocal = false)
         {
             return singleton.CreateFileLogger(LoggerType.ETLFile, name, directory, bufferSizeMB, rotation,
-                                              filenameTemplate, fileTimestampLocal);
+                                              filenameTemplate, fileTimestampLocal, TimeSpan.Zero, 0);
         }
 
         /// <summary>
@@ -584,11 +584,12 @@ namespace Microsoft.Diagnostics.Tracing.Logging
         [SuppressMessage("Microsoft.Reliability", "CA2000:Dispose objects before losing scope",
             Justification = "No need to Dispose here since we keep the logger and will clean it out later.")]
         private IEventLogger CreateFileLogger(LoggerType type, string baseName, string directory, int bufferSizeMB,
-                                              int rotation, string filenameTemplate, bool timestampLocal)
+                                              int rotation, string filenameTemplate, bool timestampLocal,
+                                              TimeSpan maximumAge, long maximumSizeMB)
         {
-            if (rotation < 0 && DefaultRotate)
+            if (rotation < 0)
             {
-                rotation = this.defaultRotationInterval;
+                rotation = DefaultRotate ? this.defaultRotationInterval : 0;
             }
 
             if (rotation > 0)
@@ -612,7 +613,7 @@ namespace Microsoft.Diagnostics.Tracing.Logging
                 }
 
                 var logger = new FileBackedLogger(baseName, directory, type, bufferSizeMB, rotation, filenameTemplate,
-                                                  timestampLocal);
+                                                  timestampLocal, maximumAge, maximumSizeMB);
                 this.fileLoggers[baseName] = logger;
                 return logger.Logger;
             }

@@ -33,7 +33,6 @@ namespace Microsoft.Diagnostics.Tracing.Logging
 
     public sealed partial class LogManager
     {
-        #region Public
         /// <summary>
         /// Provide string-based configuration which will be applied additively after any file configuration.
         /// </summary>
@@ -74,9 +73,7 @@ namespace Microsoft.Diagnostics.Tracing.Logging
         {
             return singleton.UpdateConfigurationFile(filename);
         }
-        #endregion
 
-        #region Private
         // HEY! HEY YOU! Are you adding stuff here? You're adding stuff, it's cool. Just go update
         // the 'configuration.md' file in doc with what you've added. Santa will bring you bonus gifts.
         private const string EtwOverrideXpath = "/loggers/etwlogging";
@@ -92,6 +89,8 @@ namespace Microsoft.Diagnostics.Tracing.Logging
         private const string LogTypeAttribute = "type";
         private const string LogHostnameAttribute = "hostname";
         private const string LogPortAttribute = "port";
+        private const string LogMaximumSizeAttributeMB = "maximumsizemb";
+        private const string LogMaximumAgeAttribute = "maximumage";
         private const string SourceTag = "source";
         private const string SourceKeywordsAttribute = "keywords";
         private const string SourceMinSeverityAttribute = "minimumseverity";
@@ -214,6 +213,38 @@ namespace Microsoft.Diagnostics.Tracing.Logging
                     config.Filters.Clear();
                 }
 
+                if (config.RotationInterval != 0)
+                {
+                    
+                }
+
+                if (config.MaximumAge > TimeSpan.Zero || config.MaximumSizeMB > 0)
+                {
+                    var rotationEnabled = true;
+                    if (!config.HasFeature(LogConfiguration.Features.FileBacked))
+                    {
+                        InternalLogger.Write.InvalidConfiguration($"log destination {name} has a maximum age or size defined but is not file-backed");
+                        rotationEnabled = false;
+                    }
+                    else if (config.RotationInterval == 0)
+                    {
+                        InternalLogger.Write.InvalidConfiguration($"log destination {name} does not rotate files, maximum age/size cannot be applied.");
+                        rotationEnabled = false;
+                    }
+                    else if (FileBackedLogger.IsFilenameTemplateValidForRetention(config.FilenameTemplate))
+                    {
+                        InternalLogger.Write.InvalidConfiguration($"log destination {name} has a template that is not compatible with retention.");
+                        rotationEnabled = false;
+                    }
+
+                    if (!rotationEnabled)
+                    {
+                        clean = false;
+                        config.MaximumAge = TimeSpan.Zero;
+                        config.MaximumSizeMB = 0;
+                    }
+                }
+
                 loggers[name] = config;
             }
 
@@ -264,7 +295,8 @@ namespace Microsoft.Diagnostics.Tracing.Logging
                         logger = this.CreateFileLogger(loggerConfig.FileType, loggerName, loggerConfig.Directory,
                                                        loggerConfig.BufferSize, loggerConfig.RotationInterval,
                                                        loggerConfig.FilenameTemplate,
-                                                       loggerConfig.TimestampLocal);
+                                                       loggerConfig.TimestampLocal,
+                                                       loggerConfig.MaximumAge, loggerConfig.MaximumSizeMB);
                     }
 
                     foreach (var f in loggerConfig.Filters)
@@ -403,7 +435,7 @@ namespace Microsoft.Diagnostics.Tracing.Logging
                     }
                     break;
                 case LogFilenameTemplateAttribute:
-                    if (!FileBackedLogger.IsValidFilenameTemplate(logAttribute.Value))
+                    if (!FileBackedLogger.IsValidFilenameTemplate(logAttribute.Value, TimeSpan.Zero))
                     {
                         InternalLogger.Write.InvalidConfiguration("invalid filename template " + logAttribute.Value);
                         clean = false;
@@ -447,6 +479,27 @@ namespace Microsoft.Diagnostics.Tracing.Logging
                     {
                         InternalLogger.Write.InvalidConfiguration("invalid port " + logAttribute.Value);
                         config.Port = 80;
+                        clean = false;
+                    }
+                    break;
+                case LogMaximumAgeAttribute:
+                    if (!TimeSpan.TryParse(logAttribute.Value, out config.MaximumAge)
+                        || config.MaximumAge < TimeSpan.Zero
+                        || config.MaximumAge < TimeSpan.FromSeconds(config.RotationInterval)
+                        || config.MaximumAge.Ticks % TimeSpan.TicksPerSecond != 0)
+                    {
+                        InternalLogger.Write.InvalidConfiguration("Invalid maximumAge " + logAttribute.Value);
+                        config.MaximumAge = TimeSpan.Zero;
+                        clean = false;
+                    }
+                    break;
+                case LogMaximumSizeAttributeMB:
+                    if (!long.TryParse(logAttribute.Value, out config.MaximumSizeMB)
+                        || config.MaximumSizeMB < 0)
+                    {
+                        
+                        InternalLogger.Write.InvalidConfiguration("Invalid maximumSizeMB " + logAttribute.Value);
+                        config.MaximumSizeMB = 0;
                         clean = false;
                     }
                     break;
@@ -684,6 +737,8 @@ namespace Microsoft.Diagnostics.Tracing.Logging
             public int Port;
             public int RotationInterval = -1;
             public bool TimestampLocal;
+            public long MaximumSizeMB = 0;
+            public TimeSpan MaximumAge = TimeSpan.Zero;
 
             public bool HasFeature(Features flags)
             {
@@ -710,6 +765,5 @@ namespace Microsoft.Diagnostics.Tracing.Logging
                 return ((caps & flags) != 0);
             }
         }
-        #endregion
     }
 }

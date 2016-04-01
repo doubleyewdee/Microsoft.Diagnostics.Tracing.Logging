@@ -40,11 +40,11 @@ namespace Microsoft.Diagnostics.Tracing.Logging.UnitTests
             DateTime now = DateTime.UtcNow;
             using (var utcLogger = new FileBackedLogger("loctime", ".", LoggerType.TextLogFile,
                                                         LogManager.DefaultFileBufferSizeMB, 300,
-                                                        FileBackedLogger.DefaultFilenameTemplate, false))
+                                                        FileBackedLogger.DefaultFilenameTemplate, false, TimeSpan.Zero, 0))
             {
                 using (var localLogger = new FileBackedLogger("utctime", ".", LoggerType.TextLogFile,
                                                               LogManager.DefaultFileBufferSizeMB, 300,
-                                                              FileBackedLogger.DefaultFilenameTemplate, true))
+                                                              FileBackedLogger.DefaultFilenameTemplate, true, TimeSpan.Zero, 0))
                 {
                     Assert.IsNotNull(utcLogger);
                     utcLogger.CheckedRotate(now);
@@ -95,13 +95,13 @@ namespace Microsoft.Diagnostics.Tracing.Logging.UnitTests
                 new FileBackedLogger("badlogger", ".", LoggerType.MemoryBuffer,
                                      LogManager.DefaultFileBufferSizeMB, 0,
                                      FileBackedLogger.DefaultFilenameTemplate,
-                                     false);
+                                     false, TimeSpan.Zero, 0);
                 Assert.Fail();
             }
             catch (ArgumentException) { }
 
             using (var logger = new FileBackedLogger("testfile", ".", LoggerType.TextLogFile,
-                                                     LogManager.DefaultFileBufferSizeMB, 0, "{0}", false))
+                                                     LogManager.DefaultFileBufferSizeMB, 0, "{0}", false, TimeSpan.Zero, 0))
             {
                 Assert.IsNotNull(logger.Logger);
                 Assert.AreEqual(0, logger.RotationInterval);
@@ -151,11 +151,11 @@ namespace Microsoft.Diagnostics.Tracing.Logging.UnitTests
         {
             using (var localTimeLogger = new FileBackedLogger("loctime", ".", LoggerType.TextLogFile,
                                                               LogManager.DefaultFileBufferSizeMB, 1,
-                                                              FileBackedLogger.DefaultFilenameTemplate, true))
+                                                              FileBackedLogger.DefaultFilenameTemplate, true, TimeSpan.Zero, 0))
             {
                 using (var utcTimeLogger = new FileBackedLogger("utctime", ".", LoggerType.TextLogFile,
                                                                 LogManager.DefaultFileBufferSizeMB, 1,
-                                                                FileBackedLogger.DefaultFilenameTemplate, false))
+                                                                FileBackedLogger.DefaultFilenameTemplate, false, TimeSpan.Zero, 0))
                 {
                     Assert.AreEqual(localTimeLogger.FilenameTemplate,
                                     FileBackedLogger.DefaultLocalTimeFilenameTemplate +
@@ -194,7 +194,7 @@ namespace Microsoft.Diagnostics.Tracing.Logging.UnitTests
                 externalLogger = new FileBackedLogger("external", ".", LoggerType.TextLogFile,
                                                       LogManager.DefaultFileBufferSizeMB,
                                                       1, FileBackedLogger.DefaultFilenameTemplate,
-                                                      false);
+                                                      false, TimeSpan.Zero, 0);
                 LogManager.DestroyLogger(externalLogger.Logger);
                 Assert.Fail();
             }
