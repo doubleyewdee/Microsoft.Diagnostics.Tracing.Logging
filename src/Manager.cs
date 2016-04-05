@@ -28,6 +28,7 @@ namespace Microsoft.Diagnostics.Tracing.Logging
     using System.Diagnostics.CodeAnalysis;
     using System.Diagnostics.Tracing;
     using System.IO;
+    using System.Runtime.CompilerServices;
     using System.Runtime.InteropServices;
     using System.Threading;
 
@@ -110,6 +111,22 @@ namespace Microsoft.Diagnostics.Tracing.Logging
             }
         }
 
+        /// <summary>The default filename template for rotated log files.</summary>
+        /// <remarks>
+        /// This yields a string like "foo_20110623T154000Z--T155000Z"
+        /// This bit of goop is intended to be ISO 8601 compliant and sorts very nicely.
+        /// </remarks>
+        public const string DefaultFilenameTemplate = "{0}_{1:yyyyMMdd}T{1:HHmmss}Z--T{2:HHmmss}Z";
+
+        /// <summary>The default filename template for rotated log files when using local timestamps.</summary>
+        /// <remarks>
+        /// This yields a string like "foo_20110623T154000-08--T155000-08". Note the zone offsets which help deal
+        /// with timezone changes. HOWEVER, this template assumes a timezone with ONLY hour-based offsets and this
+        /// code would not be suitable for use in areas where timezone offsets cross over into minutes (e.g. Tibet,
+        /// India, etc).
+        /// </remarks>
+        public const string DefaultLocalTimeFilenameTemplate = "{0}_{1:yyyyMMdd}T{1:HHmmsszz}--T{2:HHmmsszz}";
+
         /// <summary>
         /// Whether or not to allow ETW logging.
         /// </summary>
@@ -130,12 +147,9 @@ namespace Microsoft.Diagnostics.Tracing.Logging
         public static AllowEtwLoggingValues AllowEtwLogging { get; set; }
 
         /// <summary>
-        /// Retrieve the console logger.
+        /// Retrieve the console log.
         /// </summary>
-        public static IEventLogger ConsoleLogger
-        {
-            get { return singleton.consoleLogger; }
-        }
+        public static IEventLogger ConsoleLogger => singleton.consoleLogger;
 
         /// <summary>
         /// Start the logging system.
@@ -161,10 +175,7 @@ namespace Microsoft.Diagnostics.Tracing.Logging
         /// </summary>
         public static void Shutdown()
         {
-            if (singleton != null)
-            {
-                singleton.Dispose();
-            }
+            singleton?.Dispose();
 
             AllowEtwLogging = AllowEtwLoggingValues.None;
         }
@@ -174,14 +185,54 @@ namespace Microsoft.Diagnostics.Tracing.Logging
         /// </summary>
         /// <param name="name">Name of the logger.</param>
         /// <returns>The logger, or null if no logger of the given name exists.</returns>
+        [Obsolete("Use GetLogger method.")]
         public static IEventLogger GetFileLogger(string name)
         {
-            FileBackedLogger logger = singleton.GetNamedFileLogger(name);
-            if (logger != null)
+            // type can be ETW / Text in this case as they do the same thing.
+            return GetLogger(name, LogType.EventTracing);
+        }
+
+        public static IEventLogger GetLogger(string name, LogType logType)
+        {
+            switch (logType)
             {
-                return logger.Logger;
+            case LogType.Console:
+                return ConsoleLogger;
+            case LogType.Network:
+                return singleton.GetNamedNetworkLogger(name);
+            case LogType.EventTracing:
+            case LogType.Text:
+                return singleton.GetNamedFileLogger(name)?.Logger;
+            default:
+                throw new ArgumentException($"Cannot retrieve logs of type ${logType}", nameof(logType));
             }
-            return null;
+        }
+
+        public static IEventLogger CreateLogger(LogConfiguration configuration)
+        {
+            IEventLogger logger;
+            switch (configuration.Type)
+            {
+            case LogType.Console:
+                singleton.CreateConsoleLogger(configuration);
+                logger = singleton.consoleLogger;
+                break;
+            case LogType.MemoryBuffer:
+                logger = CreateMemoryLogger();
+                break;
+            case LogType.EventTracing:
+            case LogType.Text:
+                logger = singleton.CreateFileLogger(configuration);
+                break;
+            case LogType.Network:
+                logger = singleton.CreateNetworkLogger(configuration);
+                break;
+            default:
+                throw new ArgumentException($"Unknown log type {configuration.Type}", nameof(configuration));
+            }
+
+            configuration.Logger = logger;
+            return logger;
         }
 
         /// <summary>
@@ -196,13 +247,21 @@ namespace Microsoft.Diagnostics.Tracing.Logging
         /// <returns>An interface to the logger which was created.</returns>
         [SuppressMessage("Microsoft.Design", "CA1026:DefaultParametersShouldNotBeUsed",
             Justification = "Adding overloads for all permutations would needlessly complicate this code")]
+        [Obsolete("Use CreateLogger method.")]
         public static IEventLogger CreateTextLogger(string name, string directory = null,
                                                     int bufferSizeMB = DefaultFileBufferSizeMB, int rotation = -1,
                                                     string filenameTemplate = FileBackedLogger.DefaultFilenameTemplate,
                                                     bool fileTimestampLocal = false)
         {
-            return singleton.CreateFileLogger(LoggerType.TextLogFile, name, directory, bufferSizeMB, rotation,
-                                              filenameTemplate, fileTimestampLocal);
+            var config = new LogConfiguration(name, LogType.Text)
+                         {
+                             Directory = directory ?? DefaultDirectory,
+                             BufferSizeMB = bufferSizeMB,
+                             RotationInterval = rotation,
+                             FilenameTemplate = filenameTemplate,
+                             TimestampLocal = fileTimestampLocal
+                         };
+            return singleton.CreateFileLogger(config);
         }
 
         /// <summary>
@@ -221,13 +280,21 @@ namespace Microsoft.Diagnostics.Tracing.Logging
         /// </remarks>
         [SuppressMessage("Microsoft.Design", "CA1026:DefaultParametersShouldNotBeUsed",
             Justification = "Adding overloads for all permutations would needlessly complicate this code")]
+        [Obsolete("Use CreateLogger method.")]
         public static IEventLogger CreateETWLogger(string name, string directory = null,
                                                    int bufferSizeMB = DefaultFileBufferSizeMB, int rotation = -1,
                                                    string filenameTemplate = FileBackedLogger.DefaultFilenameTemplate,
                                                    bool fileTimestampLocal = false)
         {
-            return singleton.CreateFileLogger(LoggerType.ETLFile, name, directory, bufferSizeMB, rotation,
-                                              filenameTemplate, fileTimestampLocal);
+            var config = new LogConfiguration(name, LogType.EventTracing)
+                         {
+                             Directory = directory ?? DefaultDirectory,
+                             BufferSizeMB = bufferSizeMB,
+                             RotationInterval = rotation,
+                             FilenameTemplate = filenameTemplate,
+                             TimestampLocal = fileTimestampLocal
+                         };
+            return singleton.CreateFileLogger(config);
         }
 
         /// <summary>
@@ -250,7 +317,7 @@ namespace Microsoft.Diagnostics.Tracing.Logging
         {
             if (stream == null)
             {
-                throw new ArgumentNullException("stream");
+                throw new ArgumentNullException(nameof(stream));
             }
 
             return new MemoryLogger(stream);
@@ -263,9 +330,15 @@ namespace Microsoft.Diagnostics.Tracing.Logging
         /// <param name="hostname">Hostname to send events to.</param>
         /// <param name="port">Port to send events to.</param>
         /// <returns>The network logger.</returns>
+        [Obsolete("Use CreateLogger method.")]
         public static NetworkLogger CreateNetworkLogger(string baseName, string hostname, int port)
         {
-            return singleton.CreateNetLogger(baseName, hostname, port);
+            var configuration = new LogConfiguration(baseName, LogType.Network)
+                                {
+                                    Hostname = hostname,
+                                    Port = (ushort)port
+                                };
+            return singleton.CreateNetworkLogger(configuration);
         }
 
         /// <summary>
@@ -290,7 +363,7 @@ namespace Microsoft.Diagnostics.Tracing.Logging
         /// </remarks>
         public static bool RotateFiles()
         {
-            DateTime now = DateTime.UtcNow;
+            var now = DateTime.UtcNow;
             if (((now.Ticks - singleton.lastRotation.Ticks) / TimeSpan.TicksPerSecond) >= MinDemandRotationDelta)
             {
                 singleton.lastRotation = now;
@@ -365,10 +438,9 @@ namespace Microsoft.Diagnostics.Tracing.Logging
         /// </summary>
         public static bool IsValidDirectory(string directory)
         {
-            string newDir = directory;
             try
             {
-                GetQualifiedDirectory(ref newDir);
+                GetQualifiedDirectory(directory);
                 return true;
             }
             catch (ArgumentException)
@@ -382,15 +454,7 @@ namespace Microsoft.Diagnostics.Tracing.Logging
         /// </summary>
         public static bool IsValidFileBufferSize(int bufferSizeMB)
         {
-            try
-            {
-                CheckFileBufferSize(bufferSizeMB);
-                return true;
-            }
-            catch (ArgumentException)
-            {
-                return false;
-            }
+            return bufferSizeMB >= MinFileBufferSizeMB && (bufferSizeMB <= MaxFileBufferSizeMB || bufferSizeMB % MaxFileBufferSizeMB == 0);
         }
 
         internal const string DataDirectoryEnvironmentVariable = "DATADIR";
@@ -434,7 +498,7 @@ namespace Microsoft.Diagnostics.Tracing.Logging
                 this.OnEventSourceCreated(src);
             }
 
-            this.CreateConsoleLogger();
+            this.CreateConsoleLogger(new LogConfiguration(null, LogType.Console));
 
             if (AllowEtwLogging == AllowEtwLoggingValues.None)
             {
@@ -460,7 +524,7 @@ namespace Microsoft.Diagnostics.Tracing.Logging
                 DefaultDirectory = Path.Combine(Path.GetFullPath("."), DefaultRootPath);
             }
 
-            DateTime now = DateTime.UtcNow;
+            var now = DateTime.UtcNow;
             this.rotationTimer = new Timer(this.RotateCallback, null,
                                            ((MinRotationInterval - now.Second) * 1000) - now.Millisecond,
                                            Timeout.Infinite);
@@ -500,16 +564,52 @@ namespace Microsoft.Diagnostics.Tracing.Logging
             return false;
         }
 
-        private void CreateConsoleLogger()
+        internal static void CheckRotationInterval(int rotationInterval)
         {
-            if (this.consoleLogger != null)
+            if (rotationInterval < MinRotationInterval || rotationInterval > MaxRotationInterval)
             {
-                this.consoleLogger.Dispose();
+                throw new ArgumentOutOfRangeException("rotationInterval");
             }
 
+            if (rotationInterval % MinRotationInterval != 0)
+            {
+                throw new ArgumentException("rotation interval is not evenly divisible by minimum interval",
+                                            "rotationInterval");
+            }
+
+            if (MaxRotationInterval % rotationInterval != 0)
+            {
+                throw new ArgumentException("rotation interval does not evenly divide into maximum interval",
+                                            "rotationInterval");
+            }
+        }
+
+        internal static string GetQualifiedDirectory(string directory)
+        {
+            if (string.IsNullOrEmpty(directory))
+            {
+                directory = DefaultDirectory;
+            }
+            else if (!Path.IsPathRooted(directory))
+            {
+                directory = Path.Combine(DefaultDirectory, directory);
+            }
+
+            if (directory.IndexOfAny(Path.GetInvalidPathChars()) != -1)
+            {
+                throw new ArgumentException("directory name contains invalid characters");
+            }
+
+            return directory;
+        }
+
+        private void CreateConsoleLogger(LogConfiguration configuration)
+        {
+            this.consoleLogger?.Dispose();
+
             this.consoleLogger = new ConsoleLogger();
-            this.consoleLogger.SubscribeToEvents(InternalLogger.Write, EventLevel.Critical);
-            // means Assert will hit console.
+            configuration.Logger = this.consoleLogger;
+            this.consoleLogger.SubscribeToEvents(InternalLogger.Write, EventLevel.Critical); // means Assert will hit console.
         }
 
         private FileBackedLogger GetNamedFileLogger(string name)
@@ -536,7 +636,7 @@ namespace Microsoft.Diagnostics.Tracing.Logging
         {
             if (logger is ConsoleLogger)
             {
-                throw new ArgumentException("The console logger may not be closed", "logger");
+                throw new ArgumentException("The console logger may not be closed", nameof(logger));
             }
 
             var mem = logger as MemoryLogger;
@@ -578,57 +678,37 @@ namespace Microsoft.Diagnostics.Tracing.Logging
                 }
             }
 
-            throw new ArgumentException("logger being closed doesn't belong to us", "logger");
+            throw new ArgumentException("logger being closed doesn't belong to us", nameof(logger));
         }
 
         [SuppressMessage("Microsoft.Reliability", "CA2000:Dispose objects before losing scope",
             Justification = "No need to Dispose here since we keep the logger and will clean it out later.")]
-        private IEventLogger CreateFileLogger(LoggerType type, string baseName, string directory, int bufferSizeMB,
-                                              int rotation, string filenameTemplate, bool timestampLocal)
+        private IEventLogger CreateFileLogger(LogConfiguration configuration)
         {
-            if (rotation < 0 && DefaultRotate)
-            {
-                rotation = this.defaultRotationInterval;
-            }
-
-            if (rotation > 0)
-            {
-                CheckRotationInterval(rotation);
-            }
-
-            CheckFileBufferSize(bufferSizeMB);
-            GetQualifiedDirectory(ref directory);
-
-            if (baseName.IndexOfAny(Path.GetInvalidFileNameChars()) != -1)
-            {
-                throw new ArgumentException("base filename contains invalid characters", "baseName");
-            }
-
             lock (this.loggersLock)
             {
-                if (this.GetNamedFileLogger(baseName) != null)
+                if (this.GetNamedFileLogger(configuration.Name) != null)
                 {
-                    throw new InvalidOperationException("logger named " + baseName + " already exists");
+                    throw new InvalidOperationException($"logger {configuration.Name} already exists");
                 }
 
-                var logger = new FileBackedLogger(baseName, directory, type, bufferSizeMB, rotation, filenameTemplate,
-                                                  timestampLocal);
-                this.fileLoggers[baseName] = logger;
+                var logger = new FileBackedLogger(configuration);
+                this.fileLoggers[configuration.Name] = logger;
                 return logger.Logger;
             }
         }
 
-        private NetworkLogger CreateNetLogger(string baseName, string hostname, int port)
+        private NetworkLogger CreateNetworkLogger(LogConfiguration configuration)
         {
             lock (this.loggersLock)
             {
-                if (this.GetNamedNetworkLogger(baseName) != null)
+                if (this.GetNamedNetworkLogger(configuration.Name) != null)
                 {
-                    throw new InvalidOperationException("logger named " + baseName + " already exists");
+                    throw new InvalidOperationException($"Logger named {configuration.Name} already exists.");
                 }
 
-                var logger = new NetworkLogger(hostname, port);
-                this.networkLoggers[baseName] = logger;
+                var logger = new NetworkLogger(configuration.Hostname, configuration.Port);
+                this.networkLoggers[configuration.Name] = logger;
                 return logger;
             }
         }
@@ -653,53 +733,6 @@ namespace Microsoft.Diagnostics.Tracing.Logging
             now = DateTime.UtcNow; // We may have had a context switch after acquiring the lock, so re-get time.
             this.rotationTimer.Change(((MinRotationInterval - now.Second) * 1000) - now.Millisecond,
                                       Timeout.Infinite);
-        }
-
-        private static void CheckRotationInterval(int rotationInterval)
-        {
-            if (rotationInterval < MinRotationInterval || rotationInterval > MaxRotationInterval)
-            {
-                throw new ArgumentOutOfRangeException("rotationInterval");
-            }
-
-            if (rotationInterval % MinRotationInterval != 0)
-            {
-                throw new ArgumentException("rotation interval is not evenly divisible by minimum interval",
-                                            "rotationInterval");
-            }
-
-            if (MaxRotationInterval % rotationInterval != 0)
-            {
-                throw new ArgumentException("rotation interval does not evenly divide into maximum interval",
-                                            "rotationInterval");
-            }
-        }
-
-        private static void GetQualifiedDirectory(ref string directory)
-        {
-            if (string.IsNullOrEmpty(directory))
-            {
-                directory = DefaultDirectory;
-            }
-            else if (!Path.IsPathRooted(directory))
-            {
-                directory = Path.Combine(DefaultDirectory, directory);
-            }
-
-            if (directory.IndexOfAny(Path.GetInvalidPathChars()) != -1)
-            {
-                throw new ArgumentException("directory name contains invalid characters");
-            }
-        }
-
-        private static void CheckFileBufferSize(int bufferSizeMB)
-        {
-            if (bufferSizeMB < MinFileBufferSizeMB
-                || (bufferSizeMB > MaxFileBufferSizeMB && bufferSizeMB % MaxFileBufferSizeMB != 0))
-            {
-                throw new ArgumentOutOfRangeException("bufferSizeMB",
-                                                      "buffer size must be between MinFileBufferSizeMB and MaxFileBufferSizeMB");
-            }
         }
 
         #region IDisposable

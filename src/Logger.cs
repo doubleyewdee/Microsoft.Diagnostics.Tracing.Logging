@@ -40,19 +40,6 @@ namespace Microsoft.Diagnostics.Tracing.Logging
     using Microsoft.Diagnostics.Tracing.Parsers;
     using Microsoft.Diagnostics.Tracing.Session;
 
-    /// <summary>
-    /// Different types of loggers
-    /// </summary>
-    internal enum LoggerType
-    {
-        None,
-        Console,
-        MemoryBuffer,
-        TextLogFile,
-        ETLFile,
-        Network
-    }
-
     public sealed class EventProviderSubscription
     {
         /// <summary>
@@ -1095,21 +1082,10 @@ namespace Microsoft.Diagnostics.Tracing.Logging
     internal sealed class FileBackedLogger : IDisposable
     {
         #region Public
-        /// <summary>The default filename template for rotated log files</summary>
-        /// <remarks>
-        /// This yields a string like "foo_20110623T154000Z--T155000Z"
-        /// This bit of goop is intended to be ISO 8601 compliant and sorts very nicely.
-        /// </remarks>
-        public const string DefaultFilenameTemplate = "{0}_{1:yyyyMMdd}T{1:HHmmss}Z--T{2:HHmmss}Z";
-
-        /// <summary>The default filename template for rotated log files when using local timestamps</summary>
-        /// <remarks>
-        /// This yields a string like "foo_20110623T154000-08--T155000-08". Note the zone offsets which help deal
-        /// with timezone changes. HOWEVER, this template assumes a timezone with ONLY hour-based offsets and this
-        /// code would not be suitable for use in areas where timezone offsets cross over into minutes (e.g. Tibet,
-        /// India, etc).
-        /// </remarks>
-        public const string DefaultLocalTimeFilenameTemplate = "{0}_{1:yyyyMMdd}T{1:HHmmsszz}--T{2:HHmmsszz}";
+        [Obsolete("Use DefaultFilenameTemplate from LogManager type.")]
+        public const string DefaultFilenameTemplate = LogManager.DefaultFilenameTemplate;
+        [Obsolete("Use DefaultLocalTimeFilenameTemplate from LogManager type.")]
+        public const string DefaultLocalTimeFilenameTemplate = LogManager.DefaultLocalTimeFilenameTemplate;
 
         /// <summary>
         /// The filename extension used for text logs.
@@ -1122,77 +1098,56 @@ namespace Microsoft.Diagnostics.Tracing.Logging
         public const string ETLExtension = ".etl";
 
         /// <summary>
-        /// Constructs a manager for a file-backed logger
+        /// Constructs a manager for a file-backed logger.
         /// </summary>
-        /// <param name="baseFilename">Base portion of filename</param>
-        /// <param name="directoryName">Directory to store file(s) in</param>
-        /// <param name="logType">Type of log output</param>
-        /// <param name="bufferSizeMB">Size in kilobytes of underlying buffers used by the logger</param>
-        /// <param name="rotationInterval">Time period a single file should be open for</param>
-        /// <param name="filenameTemplate">String formatting template for the filename (if it uses rotation)</param>
-        /// <param name="timestampLocal">Whether to use local time for the timestamps</param>
+        /// <param name="configuration">Configuration for the logger.</param>
         /// <remarks>
         /// Callers are expected to call CheckedRotate() periodically to cause file rotation to occur as desired.
         /// If rotationInterval is set to 0 the file will not be rotated and the filename will not contain timestamps.
         /// </remarks>
         [SuppressMessage("Microsoft.Reliability", "CA2000:Dispose objects before losing scope",
             Justification = "We hold the logger internally and so do not want to dispose it")]
-        public FileBackedLogger(string baseFilename, string directoryName, LoggerType logType, int bufferSizeMB,
-                                int rotationInterval, string filenameTemplate, bool timestampLocal)
+        public FileBackedLogger(LogConfiguration configuration)
         {
-            this.directoryName = Path.GetFullPath(directoryName);
+            this.directoryName = Path.GetFullPath(configuration.Directory);
             if (!Directory.Exists(this.directoryName))
             {
                 Directory.CreateDirectory(this.directoryName); // allowed to throw, caller should handle it
             }
 
-            this.baseFilename = baseFilename;
-            this.directoryName = directoryName;
-            this.loggerType = logType;
-            this.RotationInterval = rotationInterval;
-            this.TimestampLocal = timestampLocal;
+            this.baseFilename = configuration.Name;
+            this.directoryName = configuration.Directory;
+            this.logType = configuration.Type;
+            this.RotationInterval = configuration.RotationInterval;
+            this.TimestampLocal = configuration.TimestampLocal;
 
-            DateTime now = this.AdjustUtcTime(DateTime.UtcNow);
+            var now = this.AdjustUtcTime(DateTime.UtcNow);
 
-            // The rest of the library callers are built to pass in our constant for filename template, ignoring
-            // whether they want local timestamps or not. Keep the logic here. We do ReferenceEquals because we
-            // expect external callers who are passing in their own templates to put in the right format if they
-            // want local time.
-            if (timestampLocal && filenameTemplate == DefaultFilenameTemplate)
+            switch (this.logType)
             {
-                filenameTemplate = DefaultLocalTimeFilenameTemplate;
-            }
-
-            if (!IsValidFilenameTemplate(filenameTemplate))
-            {
-                throw new ArgumentException("invalid template format", "filenameTemplate");
-            }
-
-            switch (this.loggerType)
-            {
-            case LoggerType.TextLogFile:
+            case LogType.Text:
                 this.fileExtension = TextLogExtension;
-                this.FilenameTemplate = filenameTemplate + this.fileExtension;
+                this.FilenameTemplate = configuration.FilenameTemplate + this.fileExtension;
                 this.UpdateCurrentFilename(now);
-                var textFileLogger = new TextFileLogger(this.currentFilename, bufferSizeMB);
-                if (!timestampLocal)
+                var textFileLogger = new TextFileLogger(this.currentFilename, configuration.BufferSizeMB);
+                if (!this.TimestampLocal)
                 {
                     textFileLogger.FormatOptions &= ~TextLogFormatOptions.TimestampInLocalTime;
                 }
                 this.Logger = textFileLogger;
                 break;
-            case LoggerType.ETLFile:
+            case LogType.EventTracing:
                 this.fileExtension = ETLExtension;
-                this.FilenameTemplate = filenameTemplate + this.fileExtension;
+                this.FilenameTemplate = configuration.FilenameTemplate + this.fileExtension;
                 this.UpdateCurrentFilename(now);
-                this.Logger = new ETLFileLogger(this.baseFilename, this.currentFilename, bufferSizeMB);
+                this.Logger = new ETLFileLogger(this.baseFilename, this.currentFilename, configuration.BufferSizeMB);
                 break;
             default:
                 throw new ArgumentException("log type " + logType + " not implemented", "logType");
             }
 
             InternalLogger.Write.CreateFileDestination(this.baseFilename, this.directoryName, this.RotationInterval,
-                                                       filenameTemplate);
+                                                       configuration.FilenameTemplate);
         }
 
         // we don't want users to be able to tweak file/dir names, only filtering.
@@ -1274,7 +1229,7 @@ namespace Microsoft.Diagnostics.Tracing.Logging
         private readonly string baseFilename;
         private readonly string directoryName;
         private readonly string fileExtension;
-        private readonly LoggerType loggerType;
+        private readonly LogType logType;
 
         private string currentFilename;
         private DateTime intervalEnd;

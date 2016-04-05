@@ -38,13 +38,21 @@ namespace Microsoft.Diagnostics.Tracing.Logging.UnitTests
             // Create a file with a 5 minute rotation time, then attempt to rotate it every minute and ensure it
             // only changes names once.
             DateTime now = DateTime.UtcNow;
-            using (var utcLogger = new FileBackedLogger("loctime", ".", LoggerType.TextLogFile,
-                                                        LogManager.DefaultFileBufferSizeMB, 300,
-                                                        FileBackedLogger.DefaultFilenameTemplate, false))
+            using (var utcLogger = new FileBackedLogger(
+                new LogConfiguration("utctime", LogType.Text)
+                {
+                    Directory = ".",
+                    RotationInterval = 300,
+                    TimestampLocal = false,
+                }))
             {
-                using (var localLogger = new FileBackedLogger("utctime", ".", LoggerType.TextLogFile,
-                                                              LogManager.DefaultFileBufferSizeMB, 300,
-                                                              FileBackedLogger.DefaultFilenameTemplate, true))
+                using (var localLogger = new FileBackedLogger(
+                    new LogConfiguration("loctime", LogType.Text)
+                    {
+                        Directory = ".",
+                        RotationInterval = 300,
+                        TimestampLocal = true,
+                    }))
                 {
                     Assert.IsNotNull(utcLogger);
                     utcLogger.CheckedRotate(now);
@@ -88,20 +96,23 @@ namespace Microsoft.Diagnostics.Tracing.Logging.UnitTests
         }
 
         [Test]
-        public void CreateFileLoggerManager()
+        public void CreateFileBackedLogger()
         {
+            LogManager.Start();
             try
             {
-                new FileBackedLogger("badlogger", ".", LoggerType.MemoryBuffer,
-                                     LogManager.DefaultFileBufferSizeMB, 0,
-                                     FileBackedLogger.DefaultFilenameTemplate,
-                                     false);
+                new FileBackedLogger(new LogConfiguration("badlogger", LogType.MemoryBuffer));
                 Assert.Fail();
             }
             catch (ArgumentException) { }
 
-            using (var logger = new FileBackedLogger("testfile", ".", LoggerType.TextLogFile,
-                                                     LogManager.DefaultFileBufferSizeMB, 0, "{0}", false))
+            using (var logger = new FileBackedLogger(
+                new LogConfiguration("testfile", LogType.Text)
+                {
+                    Directory = Path.GetFullPath("."),
+                    RotationInterval = 0,
+                    FilenameTemplate = "{0}"
+                }))
             {
                 Assert.IsNotNull(logger.Logger);
                 Assert.AreEqual(0, logger.RotationInterval);
@@ -111,6 +122,8 @@ namespace Microsoft.Diagnostics.Tracing.Logging.UnitTests
                 string fName = Path.GetFileName(fullFilename);
                 Assert.AreEqual(fName, "testfile.log");
             }
+
+            LogManager.Shutdown();
         }
 
         [Test]
@@ -149,19 +162,26 @@ namespace Microsoft.Diagnostics.Tracing.Logging.UnitTests
         [Test]
         public void FileLoggerLocalTime()
         {
-            using (var localTimeLogger = new FileBackedLogger("loctime", ".", LoggerType.TextLogFile,
-                                                              LogManager.DefaultFileBufferSizeMB, 1,
-                                                              FileBackedLogger.DefaultFilenameTemplate, true))
+            using (var localTimeLogger = new FileBackedLogger(
+                new LogConfiguration("loctime", LogType.Text)
+                {
+                    Directory = ".",
+                    RotationInterval = LogManager.MinRotationInterval,
+                    TimestampLocal = true,
+                }))
             {
-                using (var utcTimeLogger = new FileBackedLogger("utctime", ".", LoggerType.TextLogFile,
-                                                                LogManager.DefaultFileBufferSizeMB, 1,
-                                                                FileBackedLogger.DefaultFilenameTemplate, false))
+                using (var utcTimeLogger = new FileBackedLogger(
+                    new LogConfiguration("utctime", LogType.Text)
+                    {
+                        Directory = ".",
+                        RotationInterval = LogManager.MinRotationInterval,
+                        TimestampLocal = false,
+                    }))
                 {
                     Assert.AreEqual(localTimeLogger.FilenameTemplate,
-                                    FileBackedLogger.DefaultLocalTimeFilenameTemplate +
-                                    FileBackedLogger.TextLogExtension);
+                                    LogManager.DefaultLocalTimeFilenameTemplate + FileBackedLogger.TextLogExtension);
                     Assert.AreEqual(utcTimeLogger.FilenameTemplate,
-                                    FileBackedLogger.DefaultFilenameTemplate + FileBackedLogger.TextLogExtension);
+                                    LogManager.DefaultFilenameTemplate + FileBackedLogger.TextLogExtension);
                     // local time filename should be longer. (has timezone)
                     Assert.IsTrue(localTimeLogger.Logger.Filename.Length > utcTimeLogger.Logger.Filename.Length);
                 }
@@ -191,10 +211,7 @@ namespace Microsoft.Diagnostics.Tracing.Logging.UnitTests
             FileBackedLogger externalLogger = null;
             try
             {
-                externalLogger = new FileBackedLogger("external", ".", LoggerType.TextLogFile,
-                                                      LogManager.DefaultFileBufferSizeMB,
-                                                      1, FileBackedLogger.DefaultFilenameTemplate,
-                                                      false);
+                externalLogger = new FileBackedLogger(new LogConfiguration("external", LogType.Text) {Directory = "."});
                 LogManager.DestroyLogger(externalLogger.Logger);
                 Assert.Fail();
             }

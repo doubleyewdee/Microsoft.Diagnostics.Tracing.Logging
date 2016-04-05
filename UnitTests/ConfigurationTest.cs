@@ -391,9 +391,9 @@ namespace Microsoft.Diagnostics.Tracing.Logging.UnitTests
             Assert.IsFalse(
                            LogManager.IsConfigurationValid(
                                                            "<loggers><log name=\"rotation\" rotationInterval=\"8675309\"><source name=\"Microsoft.Diagnostics.Tracing.logging\" /></log></loggers>"));
-            Assert.IsFalse(
-                           LogManager.IsConfigurationValid(
-                                                           "<loggers><log name=\"rotation\" rotationInterval=\"-60\"><source name=\"Microsoft.Diagnostics.Tracing.logging\" /></log></loggers>"));
+            Assert.IsTrue(
+                          LogManager.IsConfigurationValid(
+                                                          "<loggers><log name=\"rotation\" rotationInterval=\"-60\"><source name=\"Microsoft.Diagnostics.Tracing.logging\" /></log></loggers>"));
             Assert.IsTrue(
                           LogManager.IsConfigurationValid(
                                                           "<loggers><log name=\"rotation\" rotationInterval=\"60\"><source name=\"Microsoft.Diagnostics.Tracing.logging\" /></log></loggers>"));

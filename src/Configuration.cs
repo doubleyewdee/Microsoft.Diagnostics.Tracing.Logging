@@ -142,79 +142,73 @@ namespace Microsoft.Diagnostics.Tracing.Logging
 
             foreach (XmlNode log in configuration.SelectNodes(LogTagXpath))
             {
-                string name = GetLogNameFromNode(log);
-                LoggerType type = GetLogTypeFromNode(log);
-
-                if (type == LoggerType.None)
+                string name = null;
+                LogType type;
+                if (log.Attributes[LogNameAttribute] != null)
                 {
-                    // GetLogTypeFromNode logs this particular error.
+                    name = log.Attributes[LogNameAttribute].Value.Trim();
+                }
+
+                // If no type is provided we currently default to text.
+                if (log.Attributes[LogTypeAttribute] == null)
+                {
+                    type = LogType.Text;
+                }
+                else
+                {
+                    type = LogConfiguration.StringToLogType(log.Attributes[LogTypeAttribute].Value);
+                }
+
+                if (type == LogType.None)
+                {
+                    InternalLogger.Write.InvalidConfiguration("invalid log type " + log.Attributes[LogTypeAttribute].Value);
                     clean = false;
                     continue;
                 }
 
-                if (type == LoggerType.Console)
+                if (type == LogType.Console)
                 {
                     if (name != null)
                     {
                         InternalLogger.Write.InvalidConfiguration("console log should not have a name");
                         clean = false;
                     }
-
-                    // We use a special name for the console logger that is invalid for file loggers so we can track
-                    // it along with them.
-                    name = ConsoleLoggerName;
                 }
                 else
                 {
-                    if (string.IsNullOrEmpty(name))
-                    {
-                        InternalLogger.Write.InvalidConfiguration("cannot configure a log with no name");
-                        clean = false;
-                        continue;
-                    }
-                    if (name.IndexOfAny(Path.GetInvalidFileNameChars()) != -1)
-                    {
-                        InternalLogger.Write.InvalidConfiguration("base name of log is invalid " + name);
-                        clean = false;
-                        continue;
-                    }
-
-                    if (type == LoggerType.ETLFile && AllowEtwLogging == AllowEtwLoggingValues.Disabled)
+                    // XXX: MOVE ME
+                    if (type == LogType.EventTracing && AllowEtwLogging == AllowEtwLoggingValues.Disabled)
                     {
                         InternalLogger.Write.OverridingEtwLogging(name);
-                        type = LoggerType.TextLogFile;
+                        type = LogType.Text;
                     }
                 }
 
-                // We wish to update existing configuration where possible.
+                // If a log is listed in duplicates we will discard the previous data entirely. This is a change from historic
+                // (pre OSS-release) behavior which was... quasi-intentional shall we say. The author is unaware of anybody
+                // using this capability and, since it confusing at best, would like for it to go away.
                 LogConfiguration config;
-                if (!loggers.TryGetValue(name, out config))
+                try
                 {
-                    config = new LogConfiguration();
+                    config = new LogConfiguration(name, type);
+
+                    clean &= ParseLogNode(log, config);
+
+                    if (config.SourceCount == 0)
+                    {
+                        InternalLogger.Write.InvalidConfiguration($"log destination {config.Name} has no sources.");
+                        clean = false;
+                        continue;
+                    }
+
+                    loggers[config.Name] = config;
                 }
-
-                config.FileType = type;
-                clean &= ParseLogNode(log, config);
-
-                if (config.NamedSources.Count + config.GuidSources.Count == 0)
+                catch (InvalidLogConfigurationException e)
                 {
-                    InternalLogger.Write.InvalidConfiguration("log destination " + name + " has no valid sources");
+                    InternalLogger.Write.InvalidConfiguration(e.Message);
                     clean = false;
                     continue;
                 }
-
-                // Ensure what we got has been sanitized. We currently don't do stringent checks on the console logger
-                // to see if useless stuff like a rotation interval or buffer size is set, but could in the future get
-                // more picky.
-                if (config.Filters.Count > 0 && !config.HasFeature(LogConfiguration.Features.RegexFilter))
-                {
-                    InternalLogger.Write.InvalidConfiguration("log destination " + name + " has filters but type " +
-                                                              type + " does not support this feature.");
-                    clean = false;
-                    config.Filters.Clear();
-                }
-
-                loggers[name] = config;
             }
 
             return clean;
@@ -245,211 +239,52 @@ namespace Microsoft.Diagnostics.Tracing.Logging
 
                 foreach (var kvp in this.logConfigurations)
                 {
-                    string loggerName = kvp.Key;
-                    LogConfiguration loggerConfig = kvp.Value;
-                    IEventLogger logger;
-                    if (loggerConfig.FileType == LoggerType.Console)
-                    {
-                        // We re-create the console logger to clear its config (since we don't have a better way
-                        // to do that right now).
-                        this.CreateConsoleLogger();
-                        logger = this.consoleLogger;
-                    }
-                    else if (loggerConfig.FileType == LoggerType.Network)
-                    {
-                        logger = this.CreateNetLogger(loggerName, loggerConfig.Hostname, loggerConfig.Port);
-                    }
-                    else
-                    {
-                        logger = this.CreateFileLogger(loggerConfig.FileType, loggerName, loggerConfig.Directory,
-                                                       loggerConfig.BufferSize, loggerConfig.RotationInterval,
-                                                       loggerConfig.FilenameTemplate,
-                                                       loggerConfig.TimestampLocal);
-                    }
-
-                    foreach (var f in loggerConfig.Filters)
-                    {
-                        logger.AddRegexFilter(f);
-                    }
-
-                    // Build a collection of all desired subscriptions so that we can subscribe in bulk at the end.
-                    // We do this because ordering may matter to specific types of loggers and they are best suited to
-                    // manage that internally.
-                    var subscriptions = new List<EventProviderSubscription>();
-                    foreach (var ns in loggerConfig.NamedSources)
-                    {
-                        EventSourceInfo sourceInfo;
-                        string name = ns.Key;
-                        LogSourceLevels levels = ns.Value;
-                        if ((sourceInfo = GetEventSourceInfo(name)) != null)
-                        {
-                            subscriptions.Add(new EventProviderSubscription(sourceInfo.Source)
-                                              {
-                                                  MinimumLevel = levels.Level,
-                                                  Keywords = levels.Keywords
-                                              });
-                        }
-                    }
-
-                    foreach (var gs in loggerConfig.GuidSources)
-                    {
-                        EventSourceInfo sourceInfo;
-                        Guid guid = gs.Key;
-                        LogSourceLevels levels = gs.Value;
-                        if (loggerConfig.HasFeature(LogConfiguration.Features.GuidSubscription))
-                        {
-                            subscriptions.Add(new EventProviderSubscription(guid)
-                                              {
-                                                  MinimumLevel = levels.Level,
-                                                  Keywords = levels.Keywords
-                                              });
-                        }
-                        else if (loggerConfig.HasFeature(LogConfiguration.Features.EventSourceSubscription) &&
-                                 (sourceInfo = GetEventSourceInfo(guid)) != null)
-                        {
-                            subscriptions.Add(new EventProviderSubscription(sourceInfo.Source)
-                                              {
-                                                  MinimumLevel = levels.Level,
-                                                  Keywords = levels.Keywords
-                                              });
-                        }
-                    }
-
-                    logger.SubscribeToEvents(subscriptions);
+                    var logName = kvp.Key;
+                    var logConfig = kvp.Value;
+                    CreateLogger(logConfig);
                 }
             }
 
             return true;
         }
 
-        private static void ApplyConfigForEventSource(LogConfiguration config, IEventLogger logger, EventSource source,
-                                                      LogSourceLevels levels)
-        {
-            if (config.HasFeature(LogConfiguration.Features.EventSourceSubscription))
-            {
-                logger.SubscribeToEvents(source, levels.Level, levels.Keywords);
-            }
-            else if (config.HasFeature(LogConfiguration.Features.GuidSubscription))
-            {
-                logger.SubscribeToEvents(source.Guid, levels.Level, levels.Keywords);
-            }
-        }
-
-        private static string GetLogNameFromNode(XmlNode xmlNode)
-        {
-            if (xmlNode.Attributes[LogNameAttribute] != null)
-            {
-                return xmlNode.Attributes[LogNameAttribute].Value.Trim();
-            }
-
-            return null;
-        }
-
-        private static LoggerType GetLogTypeFromNode(XmlNode xmlNode)
-        {
-            // If no type is provided we currently default to text.
-            if (xmlNode.Attributes[LogTypeAttribute] == null)
-            {
-                return LoggerType.TextLogFile;
-            }
-
-            switch (xmlNode.Attributes[LogTypeAttribute].Value.ToLower(CultureInfo.InvariantCulture))
-            {
-            case "con":
-            case "cons":
-            case "console":
-                return LoggerType.Console;
-            case "text":
-            case "txt":
-                return LoggerType.TextLogFile;
-            case "etw":
-            case "etl":
-                return LoggerType.ETLFile;
-            case "net":
-            case "network":
-                return LoggerType.Network;
-            default:
-                InternalLogger.Write.InvalidConfiguration("invalid log type " +
-                                                          xmlNode.Attributes[LogTypeAttribute].Value);
-                return LoggerType.None;
-            }
-        }
-
         private static bool ParseLogNode(XmlNode xmlNode, LogConfiguration config)
         {
-            bool clean = true;
+            var clean = true;
             foreach (XmlAttribute logAttribute in xmlNode.Attributes)
             {
-                switch (logAttribute.Name.ToLower(CultureInfo.InvariantCulture))
+                try
                 {
-                case LogBufferSizeAttribute:
-                    if (!int.TryParse(logAttribute.Value, out config.BufferSize)
-                        || !IsValidFileBufferSize(config.BufferSize))
+                    switch (logAttribute.Name.ToLower(CultureInfo.InvariantCulture))
                     {
-                        InternalLogger.Write.InvalidConfiguration("invalid buffer size " + logAttribute.Value);
-                        config.BufferSize = DefaultFileBufferSizeMB;
-                        clean = false;
-                    }
-                    break;
-                case LogDirectoryAttribute:
-                    if (!IsValidDirectory(logAttribute.Value))
-                    {
-                        InternalLogger.Write.InvalidConfiguration("invalid directory name " + logAttribute.Value);
-                        clean = false;
-                    }
-                    else
-                    {
+                    case LogBufferSizeAttribute:
+                        config.BufferSizeMB = int.Parse(logAttribute.Value);
+                        break;
+                    case LogDirectoryAttribute:
                         config.Directory = logAttribute.Value;
-                    }
-                    break;
-                case LogFilenameTemplateAttribute:
-                    if (!FileBackedLogger.IsValidFilenameTemplate(logAttribute.Value))
-                    {
-                        InternalLogger.Write.InvalidConfiguration("invalid filename template " + logAttribute.Value);
-                        clean = false;
-                    }
-                    else
-                    {
+                        break;
+                    case LogFilenameTemplateAttribute:
                         config.FilenameTemplate = logAttribute.Value;
-                    }
-                    break;
-                case LogTimestampLocal:
-                    if (!bool.TryParse(logAttribute.Value, out config.TimestampLocal))
-                    {
-                        InternalLogger.Write.InvalidConfiguration("invalid timestamplocal value " + logAttribute.Value);
-                        config.TimestampLocal = false;
-                        clean = false;
-                    }
-                    break;
-                case LogRotationAttribute:
-                    if (!int.TryParse(logAttribute.Value, out config.RotationInterval)
-                        || !IsValidRotationInterval(config.RotationInterval))
-                    {
-                        InternalLogger.Write.InvalidConfiguration("invalid rotation interval " + logAttribute.Value);
-                        config.RotationInterval = DefaultRotationInterval;
-                        clean = false;
-                    }
-                    break;
-                case LogHostnameAttribute:
-                    if (Uri.CheckHostName(logAttribute.Value) == UriHostNameType.Unknown)
-                    {
-                        InternalLogger.Write.InvalidConfiguration("invalid hostname name " + logAttribute.Value);
-                        clean = false;
-                    }
-                    else
-                    {
+                        break;
+                    case LogTimestampLocal:
+                        config.TimestampLocal = bool.Parse(logAttribute.Value);
+                        break;
+                    case LogRotationAttribute:
+                        config.RotationInterval = int.Parse(logAttribute.Value);
+                        break;
+                    case LogHostnameAttribute:
                         config.Hostname = logAttribute.Value;
+                        break;
+                    case LogPortAttribute:
+                        config.Port = ushort.Parse(logAttribute.Value);
+                        break;
                     }
-                    break;
-                case LogPortAttribute:
-                    if (!int.TryParse(logAttribute.Value, out config.Port)
-                        || config.Port <= 0)
-                    {
-                        InternalLogger.Write.InvalidConfiguration("invalid port " + logAttribute.Value);
-                        config.Port = 80;
-                        clean = false;
-                    }
-                    break;
+                }
+                catch (Exception e) when (e is FormatException || e is OverflowException)
+                {
+                    throw new InvalidLogConfigurationException(
+                        $"Attribute ${logAttribute.Name} has invalid value ${logAttribute.Value}",
+                        e);
                 }
             }
 
@@ -466,8 +301,8 @@ namespace Microsoft.Diagnostics.Tracing.Logging
             {
                 string sourceName = null;
                 Guid sourceProvider = Guid.Empty;
-                var sourceLevel = EventLevel.Informational;
-                var sourceKeywords = (long)EventKeywords.None;
+                var level = EventLevel.Informational;
+                var keywords = (long)EventKeywords.None;
                 foreach (XmlAttribute sourceAttribute in source.Attributes)
                 {
                     switch (sourceAttribute.Name.ToLower(CultureInfo.InvariantCulture))
@@ -482,14 +317,14 @@ namespace Microsoft.Diagnostics.Tracing.Logging
                         }
 
                         if (!long.TryParse(value, NumberStyles.HexNumber, CultureInfo.InvariantCulture,
-                                           out sourceKeywords))
+                                           out keywords))
                         {
                             InternalLogger.Write.InvalidConfiguration("invalid keywords value " + sourceAttribute.Value);
                             clean = false;
                         }
                         break;
                     case SourceMinSeverityAttribute:
-                        if (!Enum.TryParse(sourceAttribute.Value, true, out sourceLevel))
+                        if (!Enum.TryParse(sourceAttribute.Value, true, out level))
                         {
                             InternalLogger.Write.InvalidConfiguration("invalid severity value " + sourceAttribute.Value);
                             clean = false;
@@ -508,14 +343,13 @@ namespace Microsoft.Diagnostics.Tracing.Logging
                     }
                 }
 
-                var levels = new LogSourceLevels(sourceLevel, (EventKeywords)sourceKeywords);
                 if (sourceProvider != Guid.Empty)
                 {
-                    config.GuidSources[sourceProvider] = levels;
+                    config.AddSource(new LogSource(sourceProvider, level, (EventKeywords)keywords));
                 }
                 else if (!string.IsNullOrEmpty(sourceName))
                 {
-                    config.NamedSources[sourceName] = levels;
+                    config.AddSource(new LogSource(sourceName, level, (EventKeywords)keywords));
                 }
                 else
                 {
@@ -533,22 +367,15 @@ namespace Microsoft.Diagnostics.Tracing.Logging
 
             foreach (XmlNode source in xmlNode.SelectNodes(LogFilterTag))
             {
-                string filterValue = source.InnerText.Trim();
-                if (string.IsNullOrEmpty(filterValue))
+                try
                 {
-                    InternalLogger.Write.InvalidConfiguration("empty/invalid filter value");
-                    clean = false;
-                    continue;
+                    config.AddFilter(source.InnerText);
                 }
-
-                if (config.Filters.Contains(filterValue))
+                catch (InvalidLogConfigurationException e)
                 {
-                    InternalLogger.Write.InvalidConfiguration("duplicate filter value " + filterValue);
+                    InternalLogger.Write.InvalidConfiguration(e.Message);
                     clean = false;
-                    continue;
                 }
-
-                config.Filters.Add(filterValue);
             }
 
             return clean;
@@ -634,80 +461,6 @@ namespace Microsoft.Diagnostics.Tracing.Logging
                                             this.configurationFileLastWrite))
             {
                 ReadConfigurationFile(e.FullPath);
-            }
-        }
-
-        private sealed class LogSourceLevels
-        {
-            public readonly EventKeywords Keywords;
-            public readonly EventLevel Level;
-
-            public LogSourceLevels(EventLevel level, EventKeywords keywords)
-            {
-                this.Level = level;
-                this.Keywords = keywords;
-            }
-        }
-
-        /// <summary>
-        /// A small holder for the parsed out logging configuration of a single log
-        /// </summary>
-        private sealed class LogConfiguration
-        {
-            /// <summary>
-            /// The set of capabilities an event logger provides
-            /// </summary>
-            [Flags]
-            public enum Features
-            {
-                None = 0x0,
-                EventSourceSubscription = 0x1,
-                GuidSubscription = 0x2,
-                Unsubscription = 0x4,
-                FileBacked = 0x8,
-                RegexFilter = 0x10
-            }
-
-            public readonly HashSet<string> Filters = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-
-            public readonly Dictionary<Guid, LogSourceLevels> GuidSources =
-                new Dictionary<Guid, LogSourceLevels>();
-
-            public readonly Dictionary<string, LogSourceLevels> NamedSources =
-                new Dictionary<string, LogSourceLevels>(StringComparer.OrdinalIgnoreCase);
-
-            public int BufferSize = DefaultFileBufferSizeMB;
-            public string Directory;
-            public string FilenameTemplate = FileBackedLogger.DefaultFilenameTemplate;
-            public LoggerType FileType = LoggerType.None;
-            public string Hostname = string.Empty;
-            public int Port;
-            public int RotationInterval = -1;
-            public bool TimestampLocal;
-
-            public bool HasFeature(Features flags)
-            {
-                Features caps;
-                switch (this.FileType)
-                {
-                case LoggerType.Console:
-                case LoggerType.MemoryBuffer:
-                case LoggerType.Network:
-                    caps = (Features.EventSourceSubscription | Features.Unsubscription |
-                            Features.RegexFilter);
-                    break;
-                case LoggerType.TextLogFile:
-                    caps = (Features.EventSourceSubscription | Features.Unsubscription |
-                            Features.FileBacked | Features.RegexFilter);
-                    break;
-                case LoggerType.ETLFile:
-                    caps = (Features.EventSourceSubscription | Features.GuidSubscription | Features.FileBacked);
-                    break;
-                default:
-                    throw new InvalidOperationException("features for type " + this.FileType + " are unknowable");
-                }
-
-                return ((caps & flags) != 0);
             }
         }
         #endregion
