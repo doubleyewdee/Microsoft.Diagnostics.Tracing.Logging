@@ -119,7 +119,11 @@ namespace Microsoft.Diagnostics.Tracing.Logging.UnitTests
             catch (DirectoryNotFoundException) { }
 
             string sessionName = Path.GetFileNameWithoutExtension(logFilename);
-            IEventLogger logger = LogManager.CreateETWLogger(sessionName, ".");
+            IEventLogger logger =
+                LogManager.CreateLogger<ETLFileLogger>(new LogConfiguration(sessionName, LogType.EventTracing)
+                                                       {
+                                                           Directory = "."
+                                                       });
             logger.SubscribeToEvents(TestLogger.Write.Guid, EventLevel.Verbose);
             this.sessionName = ETLFileLogger.SessionPrefix + sessionName;
             while (TraceEventSession.GetActiveSession(this.sessionName) == null)
@@ -347,7 +351,10 @@ namespace Microsoft.Diagnostics.Tracing.Logging.UnitTests
                 }
                 if (logger == null)
                 {
-                    logger = LogManager.CreateETWLogger(currentSessionName, ".") as ETLFileLogger;
+                    logger =
+                        LogManager.CreateLogger<ETLFileLogger>(new LogConfiguration(currentSessionName,
+                                                                                    LogType.EventTracing)
+                                                               {Directory = "."});
                     logger.SubscribeToEvents(TestLogger.Write.Guid, EventLevel.Verbose);
                     while (TraceEventSession.GetActiveSession(ETLFileLogger.SessionPrefix + currentSessionName) == null)
                     {

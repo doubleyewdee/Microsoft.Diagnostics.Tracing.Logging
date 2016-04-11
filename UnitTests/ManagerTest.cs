@@ -202,11 +202,11 @@ namespace Microsoft.Diagnostics.Tracing.Logging.UnitTests
             }
             catch (ArgumentException) { }
 
-            IEventLogger someLogger = LogManager.CreateTextLogger("testlog");
-            Assert.IsNotNull(someLogger as TextFileLogger);
-            Assert.AreSame(someLogger, LogManager.GetFileLogger("testlog"));
+            var someLogger = LogManager.CreateLogger<TextFileLogger>(new LogConfiguration("testlog", LogType.Text));
+            Assert.IsNotNull(someLogger);
+            Assert.AreSame(someLogger, LogManager.GetLogger<TextFileLogger>("testlog"));
             LogManager.DestroyLogger(someLogger);
-            Assert.IsNull(LogManager.GetFileLogger("testlog"));
+            Assert.IsNull(LogManager.GetLogger<TextFileLogger>("testlog"));
 
             FileBackedLogger externalLogger = null;
             try
@@ -218,10 +218,7 @@ namespace Microsoft.Diagnostics.Tracing.Logging.UnitTests
             catch (ArgumentException) { }
             finally
             {
-                if (externalLogger != null)
-                {
-                    externalLogger.Dispose();
-                }
+                externalLogger?.Dispose();
             }
             LogManager.Shutdown();
         }
@@ -235,8 +232,11 @@ namespace Microsoft.Diagnostics.Tracing.Logging.UnitTests
             // Create a file with a large rotation time, then ensure manual rotation occurs.
             LogManager.Start();
             LogManager.SetConfiguration(""); // wipe any config
-            using (var logger = LogManager.CreateTextLogger("testfile", ".", rotation: LogManager.MaxRotationInterval)
-                                as TextFileLogger)
+            using (var logger = LogManager.CreateLogger<TextFileLogger>(new LogConfiguration("testfile", LogType.Text)
+            {
+                Directory = ".",
+                RotationInterval = LogManager.MaxRotationInterval
+            }))
             {
                 Assert.IsNotNull(logger);
                 // Subscribe to our internal events to catch cases where file rotation would try to write a message

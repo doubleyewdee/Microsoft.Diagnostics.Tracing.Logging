@@ -68,7 +68,7 @@ namespace Microsoft.Diagnostics.Tracing.Logging.UnitTests
             Assert.IsTrue(LogManager.SetConfigurationFile(configFile));
             Assert.IsTrue(LogManager.SetConfiguration(config.Replace("text", "etw")));
             Assert.AreEqual(1, LogManager.singleton.fileLoggers.Count);
-            Assert.IsNotNull(LogManager.GetFileLogger("configFileLogger") as ETLFileLogger);
+            Assert.IsNotNull(LogManager.GetLogger<ETLFileLogger>("configFileLogger"));
 
             LogManager.Shutdown();
         }
@@ -105,7 +105,7 @@ namespace Microsoft.Diagnostics.Tracing.Logging.UnitTests
 
             Assert.IsTrue(LogManager.SetConfigurationFile(configFile));
             Assert.AreEqual(1, LogManager.singleton.fileLoggers.Count);
-            Assert.IsNotNull(LogManager.GetFileLogger("configFileLogger"));
+            Assert.IsNotNull(LogManager.GetLogger<TextFileLogger>("configFileLogger"));
             long currentReadCount = LogManager.singleton.configurationFileReloadCount;
 
             using (var file = new FileStream(configFile, FileMode.Create))
@@ -128,8 +128,8 @@ namespace Microsoft.Diagnostics.Tracing.Logging.UnitTests
             }
             Assert.AreEqual(LogManager.singleton.configurationFileReloadCount, currentReadCount);
             Assert.AreEqual(1, LogManager.singleton.fileLoggers.Count);
-            Assert.IsNull(LogManager.GetFileLogger("configFileLogger"));
-            Assert.IsNotNull(LogManager.GetFileLogger("configFileLogger2"));
+            Assert.IsNull(LogManager.GetLogger("configFileLogger", LogType.Text));
+            Assert.IsNotNull(LogManager.GetLogger("configFileLogger2", LogType.Text));
 
             LogManager.Shutdown();
         }
@@ -149,7 +149,7 @@ namespace Microsoft.Diagnostics.Tracing.Logging.UnitTests
             Assert.IsTrue(LogManager.SetConfiguration(config));
             Assert.AreEqual(1, LogManager.singleton.fileLoggers.Count);
 
-            var theLogger = LogManager.GetFileLogger("etwLogger") as ETLFileLogger;
+            var theLogger = LogManager.GetLogger("etwLogger", LogType.EventTracing) as ETLFileLogger;
             Assert.IsNotNull(theLogger);
             string filename = Path.GetFileName(theLogger.Filename);
             Assert.AreEqual(filename, "etwLogger.etl");
@@ -176,7 +176,7 @@ namespace Microsoft.Diagnostics.Tracing.Logging.UnitTests
             Assert.IsTrue(LogManager.SetConfiguration(config));
             Assert.AreEqual(1, LogManager.singleton.fileLoggers.Count);
 
-            var theLogger = LogManager.GetFileLogger("subtextLogger") as TextFileLogger;
+            var theLogger = LogManager.GetLogger("subtextLogger", LogType.Text) as TextFileLogger;
             Assert.IsNotNull(theLogger);
             string filename = Path.GetFileName(theLogger.Filename);
             Assert.AreEqual(filename, "subTextLogger.log");
@@ -199,7 +199,7 @@ namespace Microsoft.Diagnostics.Tracing.Logging.UnitTests
             Assert.IsTrue(LogManager.SetConfiguration(config));
             Assert.AreEqual(1, LogManager.singleton.fileLoggers.Count);
 
-            var theLogger = LogManager.GetFileLogger("textLogger") as TextFileLogger;
+            var theLogger = LogManager.GetLogger<TextFileLogger>("textLogger");
             Assert.IsNotNull(theLogger);
             string dirname = Path.GetDirectoryName(theLogger.Filename);
             Assert.AreEqual(dirname, LogManager.DefaultDirectory);
@@ -222,7 +222,7 @@ namespace Microsoft.Diagnostics.Tracing.Logging.UnitTests
   </log>
 </loggers>"));
 
-            Assert.IsNotNull(LogManager.GetFileLogger("filtered"));
+            Assert.IsNotNull(LogManager.GetLogger<TextFileLogger>("filtered"));
             for (int i = 0; i < 42; ++i)
             {
                 TestLogger.Write.String((i % 2 == 1 ? "Oddball" : "Moneyball"));
@@ -266,7 +266,7 @@ namespace Microsoft.Diagnostics.Tracing.Logging.UnitTests
   </log>
 </loggers>"));
 
-            Assert.IsNotNull(LogManager.GetFileLogger("latestart"));
+            Assert.IsNotNull(LogManager.GetLogger<TextFileLogger>("latestart"));
             var writer = new LateInstantiationLogger();
             for (int i = 0; i < 42; ++i)
             {
@@ -289,13 +289,13 @@ namespace Microsoft.Diagnostics.Tracing.Logging.UnitTests
             LogManager.AllowEtwLogging = AllowEtwLoggingValues.Enabled;
             LogManager.Start();
             Assert.IsTrue(LogManager.SetConfiguration(config));
-            Assert.IsNotNull(LogManager.GetFileLogger("testLogger") as TextFileLogger);
+            Assert.IsNotNull(LogManager.GetLogger<TextFileLogger>("testLogger"));
 
             Assert.IsTrue(LogManager.SetConfiguration(config.Replace("text", "etl")));
-            Assert.IsNotNull(LogManager.GetFileLogger("testLogger") as ETLFileLogger);
+            Assert.IsNotNull(LogManager.GetLogger<ETLFileLogger>("testLogger"));
 
             Assert.IsTrue(LogManager.SetConfiguration(""));
-            Assert.IsNull(LogManager.GetFileLogger("testLogger"));
+            Assert.IsNull(LogManager.GetLogger<TextFileLogger>("testLogger"));
             Assert.AreEqual(0, LogManager.singleton.fileLoggers.Count);
             LogManager.Shutdown();
         }

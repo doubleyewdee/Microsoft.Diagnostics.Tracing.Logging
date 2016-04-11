@@ -137,9 +137,17 @@ namespace Microsoft.Diagnostics.Tracing.Logging
             }
             this.Type = logType;
 
-            if (logType != LogType.Console && string.IsNullOrWhiteSpace(name))
+            switch (logType)
             {
-                throw new InvalidLogConfigurationException("Log name must be specified.");
+            case LogType.Console:
+            case LogType.MemoryBuffer:
+                break;
+            default:
+                if (string.IsNullOrWhiteSpace(name))
+                {
+                    throw new InvalidLogConfigurationException("Log name must be specified.");
+                }
+                break;
             }
             if (this.HasFeature(Features.FileBacked) && name.IndexOfAny(Path.GetInvalidFileNameChars()) != -1)
             {

@@ -28,7 +28,6 @@ namespace Microsoft.Diagnostics.Tracing.Logging
     using System.Diagnostics.CodeAnalysis;
     using System.Diagnostics.Tracing;
     using System.IO;
-    using System.Runtime.CompilerServices;
     using System.Runtime.InteropServices;
     using System.Threading;
 
@@ -188,10 +187,41 @@ namespace Microsoft.Diagnostics.Tracing.Logging
         [Obsolete("Use GetLogger method.")]
         public static IEventLogger GetFileLogger(string name)
         {
-            // type can be ETW / Text in this case as they do the same thing.
-            return GetLogger(name, LogType.EventTracing);
+            // Historically we would get either/or. Emulate that here.
+            return GetLogger(name, LogType.EventTracing) ?? GetLogger(name, LogType.Text);
         }
 
+        /// <summary>
+        /// Retrieve a logger of the explicitly provided type.
+        /// </summary>
+        /// <typeparam name="T">Desired logger type.</typeparam>
+        /// <param name="name">Name of the logger.</param>
+        /// <returns>The logger or null if it does not exist.</returns>
+        public static T GetLogger<T>(string name) where T : class, IEventLogger
+        {
+            if (typeof(T) == typeof(ConsoleLogger))
+            {
+                return ConsoleLogger as T;
+            }
+            else if (typeof(T) == typeof(NetworkLogger))
+            {
+                return singleton.GetNamedNetworkLogger(name) as T;
+            }
+            else if (typeof(T) == typeof(ETLFileLogger) || typeof(T) == typeof(TextFileLogger))
+            {
+                return singleton.GetNamedFileLogger(name)?.Logger as T;
+            }
+
+            return null;
+        }
+
+        /// <summary>
+        /// Retrieve a logger of the given type. If ETW logging is disabled (directly or through configuration) both ETW and text
+        /// logs will be looked up.
+        /// </summary>
+        /// <param name="name">Name of the logger.</param>
+        /// <param name="logType">Type of the logger. Only the console, file-type, and network loggers can be retrieved.</param>
+        /// <returns>The retrieved logger or null if it does not exist.</returns>
         public static IEventLogger GetLogger(string name, LogType logType)
         {
             switch (logType)
@@ -201,14 +231,26 @@ namespace Microsoft.Diagnostics.Tracing.Logging
             case LogType.Network:
                 return singleton.GetNamedNetworkLogger(name);
             case LogType.EventTracing:
+                var logger = singleton.GetNamedFileLogger(name);
+                if (AllowEtwLogging != AllowEtwLoggingValues.Disabled && !(logger?.Logger is ETLFileLogger))
+                {
+                    return null;
+                }
+                return logger?.Logger;
             case LogType.Text:
-                return singleton.GetNamedFileLogger(name)?.Logger;
+                return GetLogger<TextFileLogger>(name);
             default:
                 throw new ArgumentException($"Cannot retrieve logs of type ${logType}", nameof(logType));
             }
         }
 
-        public static IEventLogger CreateLogger(LogConfiguration configuration)
+        /// <summary>
+        /// Creates a new logger from the provided configuration.
+        /// </summary>
+        /// <typeparam name="T">Desired logger type.</typeparam>
+        /// <param name="configuration">Log configuration to use.</param>
+        /// <returns>The newly created logger.</returns>
+        public static T CreateLogger<T>(LogConfiguration configuration) where T : class, IEventLogger
         {
             IEventLogger logger;
             switch (configuration.Type)
@@ -218,7 +260,7 @@ namespace Microsoft.Diagnostics.Tracing.Logging
                 logger = singleton.consoleLogger;
                 break;
             case LogType.MemoryBuffer:
-                logger = CreateMemoryLogger();
+                logger = new MemoryLogger(new MemoryStream(InitialMemoryStreamSize));
                 break;
             case LogType.EventTracing:
             case LogType.Text:
@@ -232,7 +274,18 @@ namespace Microsoft.Diagnostics.Tracing.Logging
             }
 
             configuration.Logger = logger;
-            return logger;
+            return logger as T;
+        }
+
+        /// <summary>
+        /// Creates a new logger from the provided configuration.
+        /// </summary>
+        /// <typeparam name="T">Desired logger type.</typeparam>
+        /// <param name="configuration">Log configuration to use.</param>
+        /// <returns>The newly created logger.</returns>
+        public static IEventLogger CreateLogger(LogConfiguration configuration)
+        {
+            return CreateLogger<IEventLogger>(configuration);
         }
 
         /// <summary>
@@ -250,7 +303,7 @@ namespace Microsoft.Diagnostics.Tracing.Logging
         [Obsolete("Use CreateLogger method.")]
         public static IEventLogger CreateTextLogger(string name, string directory = null,
                                                     int bufferSizeMB = DefaultFileBufferSizeMB, int rotation = -1,
-                                                    string filenameTemplate = FileBackedLogger.DefaultFilenameTemplate,
+                                                    string filenameTemplate = DefaultFilenameTemplate,
                                                     bool fileTimestampLocal = false)
         {
             var config = new LogConfiguration(name, LogType.Text)
@@ -283,7 +336,7 @@ namespace Microsoft.Diagnostics.Tracing.Logging
         [Obsolete("Use CreateLogger method.")]
         public static IEventLogger CreateETWLogger(string name, string directory = null,
                                                    int bufferSizeMB = DefaultFileBufferSizeMB, int rotation = -1,
-                                                   string filenameTemplate = FileBackedLogger.DefaultFilenameTemplate,
+                                                   string filenameTemplate = DefaultFilenameTemplate,
                                                    bool fileTimestampLocal = false)
         {
             var config = new LogConfiguration(name, LogType.EventTracing)
@@ -303,6 +356,7 @@ namespace Microsoft.Diagnostics.Tracing.Logging
         /// <returns>The memory logger.</returns>
         [SuppressMessage("Microsoft.Reliability", "CA2000:Dispose objects before losing scope",
             Justification = "Willing to allow MemoryLogger unhandled exceptions to result in somewhat bad behavior.")]
+        [Obsolete("Use either CreateLogger or manually instantiate a MemoryLogger object.")]
         public static MemoryLogger CreateMemoryLogger()
         {
             return new MemoryLogger(new MemoryStream(InitialMemoryStreamSize));
@@ -313,6 +367,7 @@ namespace Microsoft.Diagnostics.Tracing.Logging
         /// </summary>
         /// <param name="stream">The MemoryStream to use.</param>
         /// <returns>The memory logger.</returns>
+        [Obsolete("Manually instantiate a MemoryLogger object instead.")]
         public static MemoryLogger CreateMemoryLogger(MemoryStream stream)
         {
             if (stream == null)
@@ -476,7 +531,7 @@ namespace Microsoft.Diagnostics.Tracing.Logging
         internal static int ProcessID = Process.GetCurrentProcess().Id;
 
         // 64kB memory streams for memory loggers. This number is totally arbitrary.
-        private const int InitialMemoryStreamSize = 64 * 1024;
+        public const int InitialMemoryStreamSize = 64 * 1024;
 
         internal readonly Dictionary<string, FileBackedLogger> fileLoggers =
             new Dictionary<string, FileBackedLogger>(StringComparer.OrdinalIgnoreCase);

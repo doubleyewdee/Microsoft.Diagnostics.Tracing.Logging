@@ -123,15 +123,21 @@ namespace Stress
                     switch (t)
                     {
                     case memoryType:
-                        logger = mem = LogManager.CreateMemoryLogger();
+                        logger = mem = LogManager.CreateLogger(new LogConfiguration(null, LogType.MemoryBuffer)) as MemoryLogger;
                         break;
                     case textFileType:
-                        logger = LogManager.CreateTextLogger(textFileType, LogManager.DefaultDirectory, bufferSize,
-                                                             fileRotation);
+                        logger = LogManager.CreateLogger(new LogConfiguration(textFileType, LogType.Text)
+                                                         {
+                                                             BufferSizeMB = bufferSize,
+                                                             RotationInterval = fileRotation,
+                                                         });
                         break;
                     case etlFileType:
-                        logger = LogManager.CreateETWLogger(etlFileType, LogManager.DefaultDirectory, bufferSize,
-                                                            fileRotation);
+                        logger = LogManager.CreateLogger(new LogConfiguration(textFileType, LogType.EventTracing)
+                                                         {
+                                                             BufferSizeMB = bufferSize,
+                                                             RotationInterval = fileRotation,
+                                                         });
                         break;
                     }
 

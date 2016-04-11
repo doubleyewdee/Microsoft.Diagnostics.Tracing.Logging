@@ -225,7 +225,7 @@ namespace Microsoft.Diagnostics.Tracing.Logging.UnitTests
             Assert.AreNotEqual(goodID, skipID); // oh paranoia how I love.. loathe.. like thee.
 
             LogManager.Start();
-            MemoryLogger memoryLog = LogManager.CreateMemoryLogger();
+            MemoryLogger memoryLog = new MemoryLogger(new MemoryStream());
 
             memoryLog.SubscribeToEvents(TestLogger.Write, EventLevel.Verbose);
             memoryLog.FormatOptions = TextLogFormatOptions.ShowActivityID; // no timestamps please
@@ -298,7 +298,7 @@ namespace Microsoft.Diagnostics.Tracing.Logging.UnitTests
         {
             const string activityID = "d00dfeedbeeffeedbeefd00dfeedbeef"; // I implore thee!
             LogManager.Start();
-            MemoryLogger memoryLog = LogManager.CreateMemoryLogger();
+            var memoryLog = new MemoryLogger();
 
             memoryLog.FormatOptions &= ~TextLogFormatOptions.ProcessAndThreadData;
 
@@ -367,7 +367,7 @@ namespace Microsoft.Diagnostics.Tracing.Logging.UnitTests
         public void BasicTextWriting()
         {
             LogManager.Start();
-            MemoryLogger memoryLog = LogManager.CreateMemoryLogger();
+            var memoryLog = new MemoryLogger();
 
             memoryLog.SubscribeToEvents(TestLogger.Write, EventLevel.Verbose);
             TestLogger.Write.String("first message");
@@ -409,7 +409,7 @@ namespace Microsoft.Diagnostics.Tracing.Logging.UnitTests
         public void DisabledFlag()
         {
             LogManager.Start();
-            MemoryLogger memoryLog = LogManager.CreateMemoryLogger();
+            var memoryLog = new MemoryLogger();
 
             memoryLog.SubscribeToEvents(TestLogger.Write, EventLevel.Verbose);
             TestLogger.Write.String("bacon");
@@ -441,7 +441,7 @@ namespace Microsoft.Diagnostics.Tracing.Logging.UnitTests
         public void Filtering()
         {
             LogManager.Start();
-            MemoryLogger memoryLog = LogManager.CreateMemoryLogger();
+            var memoryLog = new MemoryLogger();
 
             memoryLog.SubscribeToEvents(TestLogger.Write, EventLevel.Verbose);
             TestLogger.Write.String("first message");
@@ -461,7 +461,7 @@ namespace Microsoft.Diagnostics.Tracing.Logging.UnitTests
             }
             memoryLog.Dispose();
 
-            memoryLog = LogManager.CreateMemoryLogger();
+            memoryLog = new MemoryLogger();
             memoryLog.SubscribeToEvents(TestLogger.Write, EventLevel.Verbose);
             memoryLog.AddRegexFilter("first");
             TestLogger.Write.String("first message");
@@ -483,7 +483,7 @@ namespace Microsoft.Diagnostics.Tracing.Logging.UnitTests
             }
             memoryLog.Dispose();
 
-            memoryLog = LogManager.CreateMemoryLogger();
+            memoryLog = new MemoryLogger();
             memoryLog.SubscribeToEvents(TestLogger.Write, EventLevel.Verbose);
             memoryLog.AddRegexFilter("BaCoN"); // filter for bacon, ensure REs are not case sensitive.
             TestLogger.Write.String("first message");
@@ -511,7 +511,7 @@ namespace Microsoft.Diagnostics.Tracing.Logging.UnitTests
         public void NamedArguments()
         {
             LogManager.Start();
-            MemoryLogger memoryLog = LogManager.CreateMemoryLogger();
+            var memoryLog = new MemoryLogger();
 
             memoryLog.SubscribeToEvents(TestLogger.Write, EventLevel.Verbose);
             memoryLog.FormatOptions &= ~TextLogFormatOptions.ProcessAndThreadData;
@@ -571,9 +571,9 @@ namespace Microsoft.Diagnostics.Tracing.Logging.UnitTests
             Assert.IsTrue(LogManager.SetConfiguration(config));
             Assert.AreEqual(1, LogManager.singleton.fileLoggers.Count);
 
-            var theLogger = LogManager.GetFileLogger("etwLogger") as ETLFileLogger;
+            var theLogger = LogManager.GetLogger<ETLFileLogger>("etwLogger");
             Assert.IsNull(theLogger);
-            var theRealLogger = LogManager.GetFileLogger("etwLogger") as TextFileLogger;
+            var theRealLogger = LogManager.GetLogger<TextFileLogger>("etwLogger");
             Assert.IsNotNull(theRealLogger);
             string filename = Path.GetFileName(theRealLogger.Filename);
             Assert.AreEqual(filename, "etwLogger.log");
@@ -587,19 +587,19 @@ namespace Microsoft.Diagnostics.Tracing.Logging.UnitTests
             LogManager.Start();
             LogManager.SetConfiguration(null);
 
-            IEventLogger logger = LogManager.CreateTextLogger("min", ".", LogManager.MinFileBufferSizeMB);
-            Assert.IsNotNull(logger);
-            LogManager.DestroyLogger(logger);
-            logger = LogManager.CreateTextLogger("max", ".", LogManager.MaxFileBufferSizeMB);
-            Assert.IsNotNull(logger);
-            LogManager.DestroyLogger(logger);
-
-            logger = LogManager.CreateETWLogger("min", ".", LogManager.MinFileBufferSizeMB);
-            Assert.IsNotNull(logger);
-            LogManager.DestroyLogger(logger);
-            logger = LogManager.CreateETWLogger("max", ".", LogManager.MaxFileBufferSizeMB);
-            Assert.IsNotNull(logger);
-            LogManager.DestroyLogger(logger);
+            foreach (var type in new[] {LogType.Text, LogType.EventTracing})
+            {
+                foreach (var bufferSize in new[] {LogManager.MinFileBufferSizeMB, LogManager.MaxFileBufferSizeMB})
+                {
+                    IEventLogger logger = LogManager.CreateLogger(new LogConfiguration("test", type)
+                                                                  {
+                                                                      Directory = ".",
+                                                                      BufferSizeMB = bufferSize,
+                                                                  });
+                    Assert.IsNotNull(logger);
+                    LogManager.DestroyLogger(logger);
+                }
+            }
 
             LogManager.Shutdown();
         }
@@ -665,7 +665,12 @@ namespace Microsoft.Diagnostics.Tracing.Logging.UnitTests
                 LogManager.SetConfiguration("");
                 LogManager.DefaultRotate = false;
 
-                var logger = LogManager.CreateNetworkLogger("NetLog", IPAddress.Loopback.ToString(), port);
+                var logger = LogManager.CreateLogger<NetworkLogger>(
+                                                                    new LogConfiguration("NetLog", LogType.Network)
+                                                                    {
+                                                                        Hostname = IPAddress.Loopback.ToString(),
+                                                                        Port = port
+                                                                    });
                 logger.SubscribeToEvents(TestLogger.Write, EventLevel.Verbose);
 
                 for (int i = 0; i < eventsToWrite; ++i)
@@ -737,12 +742,16 @@ namespace Microsoft.Diagnostics.Tracing.Logging.UnitTests
             const string logFilename = "testlog.log";
             string fullFilename = Path.Combine(LogManager.DefaultDirectory, logFilename);
             File.Delete(fullFilename);
-            IEventLogger logger = LogManager.CreateTextLogger(Path.GetFileNameWithoutExtension(logFilename), ".");
+            IEventLogger logger =
+                LogManager.CreateLogger(new LogConfiguration(Path.GetFileNameWithoutExtension(logFilename), LogType.Text)
+                                        {Directory = "."});
             Assert.IsTrue(File.Exists(fullFilename));
             LogManager.DestroyLogger(logger);
             Assert.IsFalse(File.Exists(fullFilename)); // should delete empty files
 
-            logger = LogManager.CreateTextLogger(Path.GetFileNameWithoutExtension(logFilename), ".");
+            logger =
+                LogManager.CreateLogger(new LogConfiguration(Path.GetFileNameWithoutExtension(logFilename), LogType.Text)
+                                        {Directory = "."});
             logger.SubscribeToEvents(TestLogger.Write, EventLevel.Verbose);
             const int linesToWrite = 10;
             for (int i = 0; i < linesToWrite; ++i)
@@ -754,7 +763,9 @@ namespace Microsoft.Diagnostics.Tracing.Logging.UnitTests
             Assert.AreEqual(linesToWrite, CountFileLines(fullFilename));
 
             // we should append on re-open
-            logger = LogManager.CreateTextLogger(Path.GetFileNameWithoutExtension(logFilename), ".");
+            logger =
+                LogManager.CreateLogger(new LogConfiguration(Path.GetFileNameWithoutExtension(logFilename), LogType.Text)
+                                        {Directory = "."});
             logger.SubscribeToEvents(TestLogger.Write, EventLevel.Verbose);
             const int moreLinesToWrite = 42;
             for (int i = 0; i < moreLinesToWrite; ++i)
@@ -770,7 +781,7 @@ namespace Microsoft.Diagnostics.Tracing.Logging.UnitTests
         public void Timestamps()
         {
             LogManager.Start();
-            MemoryLogger memoryLog = LogManager.CreateMemoryLogger();
+            var memoryLog = new MemoryLogger();
 
             memoryLog.SubscribeToEvents(TestLogger.Write, EventLevel.Verbose);
             memoryLog.FormatOptions &= ~TextLogFormatOptions.ProcessAndThreadData;
