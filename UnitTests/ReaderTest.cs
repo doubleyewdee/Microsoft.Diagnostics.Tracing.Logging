@@ -109,8 +109,8 @@ namespace Microsoft.Diagnostics.Tracing.Logging.UnitTests
         private string WriteTestFile(string logFilename)
         {
             LogManager.Start();
-            LogManager.SetConfiguration(null);
-            LogManager.AllowEtwLogging = AllowEtwLoggingValues.Enabled;
+            LogManager.SetConfiguration((Configuration)null);
+            LogManager.Configuration.AllowEtwLogging = Configuration.AllowEtwLoggingValues.Enabled;
             string fullFilename = Path.Combine(LogManager.DefaultDirectory, logFilename);
             try
             {
@@ -332,8 +332,8 @@ namespace Microsoft.Diagnostics.Tracing.Logging.UnitTests
             var resultFiles = new List<string>();
 
             LogManager.Start();
-            LogManager.SetConfiguration(null);
-            LogManager.AllowEtwLogging = AllowEtwLoggingValues.Enabled;
+            LogManager.SetConfiguration((Configuration)null);
+            LogManager.Configuration.AllowEtwLogging = Configuration.AllowEtwLoggingValues.Enabled;
             string currentSessionName = null;
             ETLFileLogger logger = null;
             foreach (var logFilename in files)

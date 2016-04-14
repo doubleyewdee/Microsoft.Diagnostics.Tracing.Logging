@@ -33,6 +33,7 @@
   <ItemGroup>
     <Compile Include="ActivityIDTest.cs" />
     <Compile Include="ConfigurationTest.cs" />
+    <Compile Include="EventProviderSubscriptionTests.cs" />
     <Compile Include="ExpiringCompositeEventCollectionTests.cs" />
     <Compile Include="LoggerTest.cs" />
     <Compile Include="ManagerTest.cs" />

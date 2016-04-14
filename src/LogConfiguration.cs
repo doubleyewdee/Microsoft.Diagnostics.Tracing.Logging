@@ -27,42 +27,9 @@ namespace Microsoft.Diagnostics.Tracing.Logging
     using System.Diagnostics.Tracing;
     using System.Globalization;
     using System.IO;
+    using System.Linq;
 
-    /// <summary>
-    /// A pair of level / keyword values describing what events from a source to consume.
-    /// </summary>
-    public struct LogSource
-    {
-        public readonly string Name;
-        public readonly Guid Guid;
-        public readonly EventKeywords Keywords;
-        public readonly EventLevel Level;
-
-        public LogSource(string name, EventLevel level, EventKeywords keywords)
-        {
-            if (string.IsNullOrWhiteSpace(name))
-            {
-                throw new InvalidLogConfigurationException("Name may not be null or empty.");
-            }
-            this.Name = name;
-            this.Guid = Guid.Empty;
-            this.Level = level;
-            this.Keywords = keywords;
-        }
-
-        public LogSource(Guid guid, EventLevel level, EventKeywords keywords)
-        {
-            if (guid == Guid.Empty)
-            {
-                throw new InvalidLogConfigurationException("Provider GUID must not be empty.");
-            }
-
-            this.Name = null;
-            this.Guid = guid;
-            this.Level = level;
-            this.Keywords = keywords;
-        }
-    }
+    using Newtonsoft.Json;
 
     /// <summary>
     /// Different varieties of log type.
@@ -100,25 +67,13 @@ namespace Microsoft.Diagnostics.Tracing.Logging
         Network
     }
 
-    public sealed class InvalidLogConfigurationException : Exception
-    {
-        public InvalidLogConfigurationException() { }
-
-        public InvalidLogConfigurationException(string message) : base(message) { }
-
-        public InvalidLogConfigurationException(string message, Exception innerException)
-            : base(message, innerException) { }
-    }
-
     /// <summary>
     /// A small holder for the parsed out logging configuration of a single log
     /// </summary>
+    [JsonObject(MemberSerialization = MemberSerialization.OptIn), JsonConverter(typeof(Converter))]
     public sealed class LogConfiguration
     {
-        private readonly Dictionary<Guid, LogSource> guidSources = new Dictionary<Guid, LogSource>();
-
-        private readonly Dictionary<string, LogSource> namedSources =
-            new Dictionary<string, LogSource>(StringComparer.OrdinalIgnoreCase);
+        private readonly HashSet<EventProviderSubscription> subscriptions = new HashSet<EventProviderSubscription>();
 
         private int bufferSizeMB;
         private string directory;
@@ -133,7 +88,7 @@ namespace Microsoft.Diagnostics.Tracing.Logging
         {
             if (logType == LogType.None || !Enum.IsDefined(typeof(LogType), logType))
             {
-                throw new InvalidLogConfigurationException("Log type ${logType} is invalid.");
+                throw new InvalidConfigurationException($"Log type {logType} is invalid.");
             }
             this.Type = logType;
 
@@ -145,13 +100,13 @@ namespace Microsoft.Diagnostics.Tracing.Logging
             default:
                 if (string.IsNullOrWhiteSpace(name))
                 {
-                    throw new InvalidLogConfigurationException("Log name must be specified.");
+                    throw new InvalidConfigurationException("Log name must be specified.");
                 }
                 break;
             }
             if (this.HasFeature(Features.FileBacked) && name.IndexOfAny(Path.GetInvalidFileNameChars()) != -1)
             {
-                throw new InvalidLogConfigurationException("base name ${name} of log is invalid");
+                throw new InvalidConfigurationException($"base name {name} of log is invalid");
             }
 
             // We use a special name for the console logger that is invalid for file loggers so we can track
@@ -173,7 +128,7 @@ namespace Microsoft.Diagnostics.Tracing.Logging
         /// <summary>
         /// The type of the log.
         /// </summary>
-        public LogType Type { get; }
+        public LogType Type { get; internal set; }
 
         /// <summary>
         /// Directory to emit logs to. When set the directory may be relative (in which case it will be qualified using the LogManager).
@@ -185,7 +140,7 @@ namespace Microsoft.Diagnostics.Tracing.Logging
             {
                 if (!this.HasFeature(Features.FileBacked))
                 {
-                    throw new InvalidLogConfigurationException("Directories are not valid for non-file loggers.");
+                    throw new InvalidConfigurationException("Directories are not valid for non-file loggers.");
                 }
                 try
                 {
@@ -193,7 +148,7 @@ namespace Microsoft.Diagnostics.Tracing.Logging
                 }
                 catch (ArgumentException e)
                 {
-                    throw new InvalidLogConfigurationException($"Directory {value} is not valid.", e);
+                    throw new InvalidConfigurationException($"Directory {value} is not valid.", e);
                 }
             }
         }
@@ -220,11 +175,11 @@ namespace Microsoft.Diagnostics.Tracing.Logging
             {
                 if (!this.HasFeature(Features.FileBacked))
                 {
-                    throw new InvalidLogConfigurationException("Filename templates are not valid for non-file loggers.");
+                    throw new InvalidConfigurationException("Filename templates are not valid for non-file loggers.");
                 }
                 if (!FileBackedLogger.IsValidFilenameTemplate(value))
                 {
-                    throw new InvalidLogConfigurationException($"Filename template '{value}' is invalid.");
+                    throw new InvalidConfigurationException($"Filename template '{value}' is invalid.");
                 }
 
                 this.filenameTemplate = value;
@@ -238,7 +193,7 @@ namespace Microsoft.Diagnostics.Tracing.Logging
             {
                 if (this.Type != LogType.Network)
                 {
-                    throw new InvalidLogConfigurationException("Hostnames are not valid for non-network loggers.");
+                    throw new InvalidConfigurationException("Hostnames are not valid for non-network loggers.");
                 }
                 if (Uri.CheckHostName(value) == UriHostNameType.Unknown)
                 {
@@ -256,11 +211,11 @@ namespace Microsoft.Diagnostics.Tracing.Logging
             {
                 if (this.Type != LogType.Network)
                 {
-                    throw new InvalidLogConfigurationException("Ports are not valid for non-network loggers.");
+                    throw new InvalidConfigurationException("Ports are not valid for non-network loggers.");
                 }
                 if (value == 0)
                 {
-                    throw new InvalidLogConfigurationException($"Port {value} is invalid.");
+                    throw new InvalidConfigurationException($"Port {value} is invalid.");
                 }
 
                 this.port = value;
@@ -277,7 +232,7 @@ namespace Microsoft.Diagnostics.Tracing.Logging
             {
                 if (!this.HasFeature(Features.FileBacked))
                 {
-                    throw new InvalidLogConfigurationException("Rotation intervals are not valid for non-file loggers.");
+                    throw new InvalidConfigurationException("Rotation intervals are not valid for non-file loggers.");
                 }
                 if (value < 0)
                 {
@@ -292,7 +247,7 @@ namespace Microsoft.Diagnostics.Tracing.Logging
                 }
                 catch (ArgumentException e)
                 {
-                    throw new InvalidLogConfigurationException($"Rotation interval ${value} is invalid.", e);
+                    throw new InvalidConfigurationException($"Rotation interval {value} is invalid.", e);
                 }
 
                 this.rotationInterval = value;
@@ -314,7 +269,7 @@ namespace Microsoft.Diagnostics.Tracing.Logging
             {
                 if (!LogManager.IsValidFileBufferSize(value))
                 {
-                    throw new InvalidLogConfigurationException("Buffer size ${value} is outside of acceptable range.");
+                    throw new InvalidConfigurationException($"Buffer size {value} is outside of acceptable range.");
                 }
 
                 this.bufferSizeMB = value;
@@ -327,9 +282,9 @@ namespace Microsoft.Diagnostics.Tracing.Logging
         public HashSet<string> Filters { get; }
 
         /// <summary>
-        /// The number of sources added to the configuration.
+        /// The number of subscriptions added to the configuration.
         /// </summary>
-        public int SourceCount => this.namedSources.Count + this.guidSources.Count;
+        public int SubscriptionCount => this.subscriptions.Count;
 
         internal IEventLogger Logger
         {
@@ -344,31 +299,60 @@ namespace Microsoft.Diagnostics.Tracing.Logging
             }
         }
 
-        /// <summary>
-        /// Add a source to receive log messages from. Overwrites existing values.
-        /// </summary>
-        /// <param name="source">Details of the source to subscribe to.</param>
-        /// <returns>True if the source does not already exist.</returns>
-        public bool AddSource(LogSource source)
+        public override bool Equals(object obj)
         {
-            if (source.Name == null && source.Guid == Guid.Empty)
+            var other = obj as LogConfiguration;
+            return other != null && this.Equals(other);
+        }
+
+        private bool Equals(LogConfiguration other)
+        {
+            return string.Equals(this.Name, other.Name, StringComparison.OrdinalIgnoreCase) && this.Type == other.Type;
+        }
+
+        public override int GetHashCode()
+        {
+            unchecked
             {
-                throw new InvalidLogConfigurationException("Provided source missing name and GUID values");
+                return ((this.Name != null ? StringComparer.OrdinalIgnoreCase.GetHashCode(this.Name) : 0) * 397) ^
+                       (int)this.Type;
+            }
+        }
+
+        /// <summary>
+        /// Add a subscription to receive log messages from. Combines with existing values and takes the lowest 
+        /// <see cref="EventProviderSubscription.MinimumLevel" /> and the full set of
+        /// <see cref="EventProviderSubscription.Keywords" />.
+        /// </summary>
+        /// <param name="subscription">Details of the subscription to add.</param>
+        /// <returns>True if the subscription does not already exist.</returns>
+        public bool AddSubscription(EventProviderSubscription subscription)
+        {
+            if (subscription.Name == null && subscription.ProviderID == Guid.Empty)
+            {
+                throw new InvalidConfigurationException("Provided subscription missing name and GUID values");
             }
 
-            bool exists;
-            if (source.Name != null)
+            var newSubscription = true;
+            if (this.subscriptions.Contains(subscription))
             {
-                exists = this.namedSources.ContainsKey(source.Name);
-                this.namedSources[source.Name] = source;
+                newSubscription = false;
+                var currentSubscription = this.subscriptions.First(s => s.Equals(subscription));
+                currentSubscription.MinimumLevel =
+                    (EventLevel)Math.Min((int)currentSubscription.MinimumLevel, (int)subscription.MinimumLevel);
+                currentSubscription.Keywords |= subscription.Keywords;
+                subscription = currentSubscription;
             }
             else
             {
-                exists = this.guidSources.ContainsKey(source.Guid);
-                this.guidSources[source.Guid] = source;
+                this.subscriptions.Add(subscription);
+            }
+            if (subscription.IsResolved)
+            {
+                this.Logger?.SubscribeToEvents(subscription);
             }
 
-            return exists;
+            return newSubscription;
         }
 
         public static LogType StringToLogType(string type)
@@ -402,12 +386,12 @@ namespace Microsoft.Diagnostics.Tracing.Logging
         {
             if (string.IsNullOrWhiteSpace(filter))
             {
-                throw new InvalidLogConfigurationException("empty/invalid filter value.");
+                throw new InvalidConfigurationException("empty/invalid filter value.");
             }
 
             if (!this.HasFeature(Features.RegexFilter))
             {
-                throw new InvalidLogConfigurationException(
+                throw new InvalidConfigurationException(
                     $"Log type {this.Type} does not support regular expression filters.");
             }
 
@@ -415,10 +399,11 @@ namespace Microsoft.Diagnostics.Tracing.Logging
 
             if (this.Filters.Contains(filter))
             {
-                throw new InvalidLogConfigurationException("duplicate filter value " + filter);
+                throw new InvalidConfigurationException("duplicate filter value " + filter);
             }
 
             this.Filters.Add(filter);
+            this.Logger?.AddRegexFilter(filter);
         }
 
         internal bool HasFeature(Features flags)
@@ -453,22 +438,35 @@ namespace Microsoft.Diagnostics.Tracing.Logging
         internal void UpdateForEventSource(EventSource eventSource)
         {
             // We need to update our loggers any time a config shows up where they had a dependency
-            // that probably wasn't resolved. This will be the case either when it was a named source
-            // or it was a GUID source on a type that can't directly subscribe to GUIDs (i.e. not an ETW
+            // that probably wasn't resolved. This will be the case either when it was a named subscription
+            // or it was a GUID subscription on a type that can't directly subscribe to GUIDs (i.e. not an ETW
             // trace session)
-            LogSource levels;
-            if (this.namedSources.TryGetValue(eventSource.Name, out levels) ||
-                (!this.HasFeature(Features.GuidSubscription) &&
-                 this.guidSources.TryGetValue(eventSource.Guid, out levels)))
+            var subscription =
+                this.subscriptions.FirstOrDefault(
+                                                  s =>
+                                                  string.Equals(s.Name, eventSource.Name,
+                                                                StringComparison.OrdinalIgnoreCase) ||
+                                                  (!this.HasFeature(Features.GuidSubscription) &&
+                                                   s.ProviderID == eventSource.Guid));
+            if (subscription != null && !subscription.IsResolved)
             {
+                subscription.UpdateSource(eventSource);
                 if (this.HasFeature(Features.EventSourceSubscription))
                 {
-                    this.logger.SubscribeToEvents(eventSource, levels.Level, levels.Keywords);
+                    this.logger.SubscribeToEvents(eventSource, subscription.MinimumLevel, subscription.Keywords);
                 }
                 else if (this.HasFeature(Features.GuidSubscription))
                 {
-                    this.logger.SubscribeToEvents(eventSource.Guid, levels.Level, levels.Keywords);
+                    this.logger.SubscribeToEvents(eventSource.Guid, subscription.MinimumLevel, subscription.Keywords);
                 }
+            }
+        }
+
+        internal void Merge(LogConfiguration otherLog)
+        {
+            foreach (var sub in otherLog.subscriptions)
+            {
+                this.AddSubscription(sub);
             }
         }
 
@@ -485,47 +483,20 @@ namespace Microsoft.Diagnostics.Tracing.Logging
             // Build a collection of all desired subscriptions so that we can subscribe in bulk at the end.
             // We do this because ordering may matter to specific types of loggers and they are best suited to
             // manage that internally.
-            var subscriptions = new List<EventProviderSubscription>();
-            foreach (var ns in this.namedSources)
+            var supportedSubscriptions = new List<EventProviderSubscription>();
+            foreach (var sub in this.subscriptions)
             {
-                LogManager.EventSourceInfo sourceInfo;
-                string name = ns.Key;
-                LogSource levels = ns.Value;
-                if ((sourceInfo = LogManager.GetEventSourceInfo(name)) != null)
+                if (!sub.IsResolved)
                 {
-                    subscriptions.Add(new EventProviderSubscription(sourceInfo.Source)
-                                      {
-                                          MinimumLevel = levels.Level,
-                                          Keywords = levels.Keywords
-                                      });
+                    continue;
+                }
+                if (sub.Source != null || (this.HasFeature(Features.GuidSubscription) && sub.ProviderID != Guid.Empty))
+                {
+                    supportedSubscriptions.Add(sub);
                 }
             }
 
-            foreach (var gs in this.guidSources)
-            {
-                LogManager.EventSourceInfo sourceInfo;
-                var guid = gs.Key;
-                var levels = gs.Value;
-                if (this.HasFeature(Features.GuidSubscription))
-                {
-                    subscriptions.Add(new EventProviderSubscription(guid)
-                                      {
-                                          MinimumLevel = levels.Level,
-                                          Keywords = levels.Keywords
-                                      });
-                }
-                else if (this.HasFeature(Features.EventSourceSubscription) &&
-                         (sourceInfo = LogManager.GetEventSourceInfo(guid)) != null)
-                {
-                    subscriptions.Add(new EventProviderSubscription(sourceInfo.Source)
-                                      {
-                                          MinimumLevel = levels.Level,
-                                          Keywords = levels.Keywords
-                                      });
-                }
-            }
-
-            this.logger.SubscribeToEvents(subscriptions);
+            this.logger.SubscribeToEvents(supportedSubscriptions);
         }
 
         /// <summary>
@@ -540,6 +511,33 @@ namespace Microsoft.Diagnostics.Tracing.Logging
             Unsubscription = 0x4,
             FileBacked = 0x8,
             RegexFilter = 0x10
+        }
+
+        private sealed class Converter : JsonConverter
+        {
+            public override void WriteJson(JsonWriter writer, object value, JsonSerializer serializer)
+            {
+                throw new NotImplementedException();
+                var log = value as LogConfiguration;
+                if (log == null)
+                {
+                    throw new ArgumentNullException(nameof(value));
+                }
+
+                writer.WriteStartObject();
+                writer.WriteEndObject();
+            }
+
+            public override object ReadJson(JsonReader reader, Type objectType, object existingValue,
+                                            JsonSerializer serializer)
+            {
+                throw new NotImplementedException();
+            }
+
+            public override bool CanConvert(Type objectType)
+            {
+                return objectType == typeof(LogConfiguration);
+            }
         }
     }
 }

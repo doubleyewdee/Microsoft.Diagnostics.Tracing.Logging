@@ -541,23 +541,23 @@ namespace Microsoft.Diagnostics.Tracing.Logging.UnitTests
         {
             // should be None on shutdown
             LogManager.Shutdown();
-            Assert.AreEqual(AllowEtwLoggingValues.None, LogManager.AllowEtwLogging);
+            Assert.AreEqual(Configuration.AllowEtwLoggingValues.None, LogManager.Configuration.AllowEtwLogging);
 
             LogManager.Start();
-            Assert.AreNotEqual(AllowEtwLoggingValues.None, LogManager.AllowEtwLogging);
+            Assert.AreNotEqual(Configuration.AllowEtwLoggingValues.None, LogManager.Configuration.AllowEtwLogging);
             LogManager.Shutdown();
 
             // If we give it a value the value must persist
-            LogManager.AllowEtwLogging = AllowEtwLoggingValues.Enabled;
+            LogManager.Configuration.AllowEtwLogging = Configuration.AllowEtwLoggingValues.Enabled;
             LogManager.Start();
-            Assert.AreEqual(AllowEtwLoggingValues.Enabled, LogManager.AllowEtwLogging);
+            Assert.AreEqual(Configuration.AllowEtwLoggingValues.Enabled, LogManager.Configuration.AllowEtwLogging);
             LogManager.Shutdown();
-            Assert.AreEqual(AllowEtwLoggingValues.None, LogManager.AllowEtwLogging);
-            LogManager.AllowEtwLogging = AllowEtwLoggingValues.Disabled;
+            Assert.AreEqual(Configuration.AllowEtwLoggingValues.None, LogManager.Configuration.AllowEtwLogging);
+            LogManager.Configuration.AllowEtwLogging = Configuration.AllowEtwLoggingValues.Disabled;
             LogManager.Start();
-            Assert.AreEqual(AllowEtwLoggingValues.Disabled, LogManager.AllowEtwLogging);
+            Assert.AreEqual(Configuration.AllowEtwLoggingValues.Disabled, LogManager.Configuration.AllowEtwLogging);
             LogManager.Shutdown();
-            Assert.AreEqual(AllowEtwLoggingValues.None, LogManager.AllowEtwLogging);
+            Assert.AreEqual(Configuration.AllowEtwLoggingValues.None, LogManager.Configuration.AllowEtwLogging);
 
             // Okay, now make sure if we give it config that it does override for us
             const string config = @"
@@ -566,7 +566,7 @@ namespace Microsoft.Diagnostics.Tracing.Logging.UnitTests
     <source name=""Microsoft.Diagnostics.Tracing.Logging"" />
   </log>
 </loggers>";
-            LogManager.AllowEtwLogging = AllowEtwLoggingValues.Disabled;
+            LogManager.Configuration.AllowEtwLogging = Configuration.AllowEtwLoggingValues.Disabled;
             LogManager.Start();
             Assert.IsTrue(LogManager.SetConfiguration(config));
             Assert.AreEqual(1, LogManager.singleton.fileLoggers.Count);
@@ -585,7 +585,7 @@ namespace Microsoft.Diagnostics.Tracing.Logging.UnitTests
         public void TestBufferSizeLimits()
         {
             LogManager.Start();
-            LogManager.SetConfiguration(null);
+            LogManager.SetConfiguration((Configuration)null);
 
             foreach (var type in new[] {LogType.Text, LogType.EventTracing})
             {
@@ -701,7 +701,7 @@ namespace Microsoft.Diagnostics.Tracing.Logging.UnitTests
             LogManager.Shutdown(); // not needed by us
 
             // set this just to make sure it isn't actually used.
-            LogManager.AllowEtwLogging = AllowEtwLoggingValues.Disabled;
+            LogManager.Configuration.AllowEtwLogging = Configuration.AllowEtwLoggingValues.Disabled;
 
             File.Delete("fakesession.etl");
             var s1 = new TraceEventSession(ETLFileLogger.SessionPrefix + "fakeSession", "fakeSession.etl");

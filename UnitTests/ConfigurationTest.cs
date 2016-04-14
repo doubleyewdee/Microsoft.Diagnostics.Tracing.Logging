@@ -84,7 +84,7 @@ namespace Microsoft.Diagnostics.Tracing.Logging.UnitTests
   </log>
 </loggers>";
             LogManager.Start();
-            LogManager.SetConfiguration(null); // wipe any config
+            LogManager.SetConfiguration((string)null); // wipe any config
             Assert.AreEqual(0, LogManager.singleton.fileLoggers.Count);
 
             File.Delete(configFile);
@@ -144,7 +144,7 @@ namespace Microsoft.Diagnostics.Tracing.Logging.UnitTests
   </log>
 </loggers>";
 
-            LogManager.AllowEtwLogging = AllowEtwLoggingValues.Enabled;
+            LogManager.Configuration.AllowEtwLogging = Configuration.AllowEtwLoggingValues.Enabled;
             LogManager.Start();
             Assert.IsTrue(LogManager.SetConfiguration(config));
             Assert.AreEqual(1, LogManager.singleton.fileLoggers.Count);
@@ -241,7 +241,7 @@ namespace Microsoft.Diagnostics.Tracing.Logging.UnitTests
                                                       @"<loggers>
 <etwlogging enabled=""true"" />
 </loggers>"));
-            Assert.AreEqual(AllowEtwLoggingValues.Enabled, LogManager.AllowEtwLogging);
+            Assert.AreEqual(Configuration.AllowEtwLoggingValues.Enabled, LogManager.Configuration.AllowEtwLogging);
 
             LogManager.Shutdown();
             LogManager.Start();
@@ -249,7 +249,7 @@ namespace Microsoft.Diagnostics.Tracing.Logging.UnitTests
                                                       @"<loggers>
 <etwlogging enabled=""False"" />
 </loggers>"));
-            Assert.AreEqual(AllowEtwLoggingValues.Disabled, LogManager.AllowEtwLogging);
+            Assert.AreEqual(Configuration.AllowEtwLoggingValues.Disabled, LogManager.Configuration.AllowEtwLogging);
             LogManager.Shutdown();
         }
 
@@ -286,7 +286,7 @@ namespace Microsoft.Diagnostics.Tracing.Logging.UnitTests
     <source name=""Microsoft.Diagnostics.Tracing.Logging"" />
   </log>
 </loggers>";
-            LogManager.AllowEtwLogging = AllowEtwLoggingValues.Enabled;
+            LogManager.Configuration.AllowEtwLogging = Configuration.AllowEtwLoggingValues.Enabled;
             LogManager.Start();
             Assert.IsTrue(LogManager.SetConfiguration(config));
             Assert.IsNotNull(LogManager.GetLogger<TextFileLogger>("testLogger"));

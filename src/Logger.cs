@@ -40,55 +40,6 @@ namespace Microsoft.Diagnostics.Tracing.Logging
     using Microsoft.Diagnostics.Tracing.Parsers;
     using Microsoft.Diagnostics.Tracing.Session;
 
-    public sealed class EventProviderSubscription
-    {
-        private EventProviderSubscription()
-        {
-            this.Keywords = EventKeywords.None;
-            this.MinimumLevel = EventLevel.Informational;
-        }
-
-        public EventProviderSubscription(EventSource source) : this()
-        {
-            if (source == null)
-            {
-                throw new ArgumentNullException(nameof(source));
-            }
-
-            this.Source = source;
-        }
-
-        public EventProviderSubscription(Guid providerID) : this()
-        {
-            if (providerID == Guid.Empty)
-            {
-                throw new ArgumentException("Must specify valid provider ID", nameof(providerID));
-            }
-
-            this.ProviderID = providerID;
-        }
-
-        /// <summary>
-        /// Keywords to match.
-        /// </summary>
-        public EventKeywords Keywords { get; set; }
-
-        /// <summary>
-        /// Minimum event level to record.
-        /// </summary>
-        public EventLevel MinimumLevel { get; set; }
-
-        /// <summary>
-        /// EventSource to subscribe to. May be null if ProviderID is provided.
-        /// </summary>
-        public EventSource Source { get; }
-
-        /// <summary>
-        /// Guid to subscribe to. May be empty if Source is provided.
-        /// </summary>
-        public Guid ProviderID { get; }
-    }
-
     /// <summary>
     /// The common interfaces for an event logger which allow callers to subscribe to and unsubscribe from specific
     /// events, add filters, and get the backing filename.
@@ -658,6 +609,10 @@ namespace Microsoft.Diagnostics.Tracing.Logging
         /// <param name="stream">The memory stream to write into.</param>
         public MemoryLogger(MemoryStream stream)
         {
+            if (stream == null)
+            {
+                throw new ArgumentNullException(nameof(stream));
+            }
             this.Stream = stream;
             this.Writer = new StreamWriter(this.Stream, new UTF8Encoding(false, false));
             InternalLogger.Write.LoggerDestinationOpened(this.GetType().ToString(), ":memory:");

@@ -31,26 +31,188 @@ namespace Microsoft.Diagnostics.Tracing.Logging
     using System.Runtime.InteropServices;
     using System.Threading;
 
-    /// <summary>
-    /// Possible values for <see cref="LogManager.AllowEtwLogging"/>
-    /// </summary>
-    public enum AllowEtwLoggingValues
+    public sealed partial class LogManager
     {
-        /// <summary>
-        /// Allow the log manager to decide what to do.
-        /// </summary>
-        None = 0,
+        private string configurationFile;
+        private long configurationFileLastWrite;
+        internal int configurationFileReloadCount; // primarily a test hook.
+        private FileSystemWatcher configurationFileWatcher;
+        private Configuration fileConfiguration;
+        private Configuration processConfiguration;
 
         /// <summary>
-        /// Write text logs instead of ETW when files are configured for ETW.
+        /// Provide string-based configuration which will be applied additively after any file configuration.
         /// </summary>
-        Disabled,
+        /// <remarks>
+        /// Any change will force a full configuration reload. This function is not thread-safe.
+        /// Using the string variant of this function will overwrite data provided using the <see cref="Configuration" />
+        /// variant of the method.
+        /// </remarks>
+        /// <param name="configurationString">A string containing the JSON or XML configuration.</param>
+        /// <returns>True if the configuration was successfully applied.</returns>
+        [Obsolete("Provide a Configuration object instead.")]
+        public static bool SetConfiguration(string configurationString)
+        {
+            Configuration newConfiguration;
+            if (!Configuration.ParseConfiguration(configurationString, out newConfiguration))
+            {
+                return false;
+            }
+
+            singleton.processConfiguration = newConfiguration;
+            singleton.ApplyConfiguration();
+            return true;
+        }
 
         /// <summary>
-        /// Write ETW when files are configured to do so. If kernel mode ETW is not available the logger will fail
-        /// to initialize.
+        /// Provide configuration which will be applied additively after any file configuration.
         /// </summary>
-        Enabled
+        /// <remarks>
+        /// Any change will force a full configuration reload. This function is not thread-safe.
+        /// </remarks>
+        /// <param name="configuration">Data to use for additive configuration (may be null to remove existing data).</param>
+        /// <returns>True if the configuration was successfully applied.</returns>
+        public static void SetConfiguration(Configuration configuration)
+        {
+            singleton.processConfiguration = configuration;
+            singleton.ApplyConfiguration();
+        }
+
+        /// <summary>
+        /// Check if a configuration string is valid.
+        /// </summary>
+        /// <param name="configurationString">A string containing the JSON or XML configuration.</param>
+        /// <returns>true if the configuration is valid, false otherwise.</returns>
+        internal static bool IsConfigurationValid(string configurationString)
+        {
+            Configuration unused;
+            return Configuration.ParseConfiguration(configurationString, out unused);
+        }
+
+        /// <summary>
+        /// Assign a file to read configuration from. If the file is invalid existing configuration from a previous file (if any)
+        /// will be removed.
+        /// </summary>
+        /// <param name="filename">The file to read configuration from (or null to remove use of the file).</param>
+        /// <returns>true if the file was valid, false otherwise.</returns>
+        public static bool SetConfigurationFile(string filename)
+        {
+            return singleton.UpdateConfigurationFile(filename);
+        }
+
+        private void ApplyConfiguration()
+        {
+            Configuration.Reset();
+            Configuration.Merge(this.fileConfiguration);
+            Configuration.Merge(this.processConfiguration);
+
+            lock (this.loggersLock)
+            {
+                foreach (var logger in this.fileLoggers.Values)
+                {
+                    logger.Dispose();
+                }
+                foreach (var logger in this.networkLoggers.Values)
+                {
+                    logger.Dispose();
+                }
+                this.fileLoggers.Clear();
+                this.networkLoggers.Clear();
+
+                foreach (var logConfig in Configuration.Logs)
+                {
+                    CreateLogger(logConfig);
+                }
+            }
+        }
+
+        [SuppressMessage("Microsoft.Security", "CA2122:DoNotIndirectlyExposeMethodsWithLinkDemands")]
+        private bool UpdateConfigurationFile(string filename)
+        {
+            if (filename != null && !File.Exists(filename))
+            {
+                throw new FileNotFoundException("configuration file does not exist", filename);
+            }
+
+            if (this.configurationFileWatcher != null)
+            {
+                this.configurationFileWatcher.Dispose();
+                this.configurationFileWatcher = null;
+            }
+
+            InternalLogger.Write.SetConfigurationFile(filename);
+            if (filename != null)
+            {
+                this.configurationFile = Path.GetFullPath(filename);
+                this.configurationFileWatcher =
+                    new FileSystemWatcher
+                    {
+                        Path = Path.GetDirectoryName(this.configurationFile),
+                        Filter = Path.GetFileName(this.configurationFile),
+                        NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.Size | NotifyFilters.CreationTime
+                    };
+                this.configurationFileWatcher.Changed += this.OnConfigurationFileChanged;
+                this.configurationFileWatcher.EnableRaisingEvents = true;
+                return ReadConfigurationFile(this.configurationFile);
+            }
+
+            singleton.fileConfiguration = null;
+            singleton.ApplyConfiguration();
+            return false;
+        }
+
+        private static bool ReadConfigurationFile(string filename)
+        {
+            Stream file = null;
+            var success = false;
+            try
+            {
+                file = new FileStream(filename, FileMode.Open, FileAccess.Read);
+                using (var reader = new StreamReader(file))
+                {
+                    file = null;
+                    Configuration configuration;
+                    success = Configuration.ParseConfiguration(reader.ReadToEnd(), out configuration);
+                    if (success)
+                    {
+                        singleton.fileConfiguration = configuration;
+                        singleton.ApplyConfiguration();
+                    }
+                }
+            }
+            catch (IOException e)
+            {
+                InternalLogger.Write.InvalidConfiguration($"Could not open configuration: {e.GetType()} {e.Message}");
+            }
+            finally
+            {
+                file?.Dispose();
+            }
+
+            if (success)
+            {
+                InternalLogger.Write.ProcessedConfigurationFile(filename);
+                ++singleton.configurationFileReloadCount;
+            }
+            else
+            {
+                InternalLogger.Write.InvalidConfigurationFile(filename);
+            }
+
+            return success;
+        }
+
+        private void OnConfigurationFileChanged(object source, FileSystemEventArgs e)
+        {
+            long writeTime = new FileInfo(e.FullPath).LastWriteTimeUtc.ToFileTimeUtc();
+
+            if (writeTime !=
+                Interlocked.CompareExchange(ref this.configurationFileLastWrite, writeTime,
+                                            this.configurationFileLastWrite))
+            {
+                ReadConfigurationFile(e.FullPath);
+            }
+        }
     }
 
     /// <summary>
@@ -127,28 +289,15 @@ namespace Microsoft.Diagnostics.Tracing.Logging
         public const string DefaultLocalTimeFilenameTemplate = "{0}_{1:yyyyMMdd}T{1:HHmmsszz}--T{2:HHmmsszz}";
 
         /// <summary>
-        /// Whether or not to allow ETW logging.
+        /// Current configuration for the log manager.
         /// </summary>
-        /// <remarks>
-        /// The default value (None) means that when the log manager is started it will determine based on its environment
-        /// whether or not to allow ETW logging. If the value is set prior to calling <see cref="Start"/> then that value
-        /// will be honored.
-        /// 
-        /// When the manager is shutdown the value will be reset to None.
-        ///
-        /// Why do this? Many users in a "single box" scenario aren't ready to deal with the overhead of ETW. ETW creates
-        /// files locked to the kernel which, when a process is improperly terminated, just stay open. For many folks not
-        /// interested in logging the behavior is incredibly disruptive to their iterative development process and, really,
-        /// all they want is to notepad.exe some test logs without extra pain involved in dealing with a binary format.
-        /// Additionally, for tests which fail and terminate early it's easier to deal with failures that do not happen
-        /// to leave dangling logging sessions.
-        /// </remarks>
-        public static AllowEtwLoggingValues AllowEtwLogging { get; set; }
+        public static readonly Configuration Configuration = new Configuration();
 
         /// <summary>
         /// Retrieve the console log.
         /// </summary>
-        public static IEventLogger ConsoleLogger => singleton.consoleLogger;
+        [Obsolete("Use the GetLogger method to retrieve the console logger.")]
+        public static IEventLogger ConsoleLogger => singleton?.consoleLogger;
 
         /// <summary>
         /// Start the logging system.
@@ -175,8 +324,7 @@ namespace Microsoft.Diagnostics.Tracing.Logging
         public static void Shutdown()
         {
             singleton?.Dispose();
-
-            AllowEtwLogging = AllowEtwLoggingValues.None;
+            Configuration.Reset();
         }
 
         /// <summary>
@@ -201,7 +349,7 @@ namespace Microsoft.Diagnostics.Tracing.Logging
         {
             if (typeof(T) == typeof(ConsoleLogger))
             {
-                return ConsoleLogger as T;
+                return singleton?.consoleLogger as T;
             }
             else if (typeof(T) == typeof(NetworkLogger))
             {
@@ -227,12 +375,12 @@ namespace Microsoft.Diagnostics.Tracing.Logging
             switch (logType)
             {
             case LogType.Console:
-                return ConsoleLogger;
+                return singleton?.consoleLogger;
             case LogType.Network:
                 return singleton.GetNamedNetworkLogger(name);
             case LogType.EventTracing:
                 var logger = singleton.GetNamedFileLogger(name);
-                if (AllowEtwLogging != AllowEtwLoggingValues.Disabled && !(logger?.Logger is ETLFileLogger))
+                if (Configuration.AllowEtwLogging != Configuration.AllowEtwLoggingValues.Disabled && !(logger?.Logger is ETLFileLogger))
                 {
                     return null;
                 }
@@ -240,7 +388,7 @@ namespace Microsoft.Diagnostics.Tracing.Logging
             case LogType.Text:
                 return GetLogger<TextFileLogger>(name);
             default:
-                throw new ArgumentException($"Cannot retrieve logs of type ${logType}", nameof(logType));
+                throw new ArgumentException($"Cannot retrieve logs of type {logType}", nameof(logType));
             }
         }
 
@@ -370,11 +518,6 @@ namespace Microsoft.Diagnostics.Tracing.Logging
         [Obsolete("Manually instantiate a MemoryLogger object instead.")]
         public static MemoryLogger CreateMemoryLogger(MemoryStream stream)
         {
-            if (stream == null)
-            {
-                throw new ArgumentNullException(nameof(stream));
-            }
-
             return new MemoryLogger(stream);
         }
 
@@ -554,17 +697,11 @@ namespace Microsoft.Diagnostics.Tracing.Logging
             }
 
             this.CreateConsoleLogger(new LogConfiguration(null, LogType.Console));
-
-            if (AllowEtwLogging == AllowEtwLoggingValues.None)
+            if (Configuration.AllowEtwLogging == Configuration.AllowEtwLoggingValues.None)
             {
-                if (IsCurrentProcessElevated())
-                {
-                    AllowEtwLogging = AllowEtwLoggingValues.Enabled;
-                }
-                else
-                {
-                    AllowEtwLogging = AllowEtwLoggingValues.Disabled;
-                }
+                Configuration.AllowEtwLogging = IsCurrentProcessElevated()
+                                                    ? Configuration.AllowEtwLoggingValues.Enabled
+                                                    : Configuration.AllowEtwLoggingValues.Disabled;
             }
 
             // Determine default directory
@@ -595,12 +732,12 @@ namespace Microsoft.Diagnostics.Tracing.Logging
                 NativeMethods.TOKEN_ELEVATION tokenElevation;
                 tokenElevation.TokenIsElevated = 0;
                 var tokenElevationSize = Marshal.SizeOf(tokenElevation);
-                IntPtr tokenElevationPtr = Marshal.AllocHGlobal(tokenElevationSize);
-                uint unusedSize;
+                var tokenElevationPtr = Marshal.AllocHGlobal(tokenElevationSize);
 
                 try
                 {
                     Marshal.StructureToPtr(tokenElevation, tokenElevationPtr, true);
+                    uint unusedSize;
                     if (NativeMethods.GetTokenInformation(token, NativeMethods.TOKEN_INFORMATION_CLASS.TokenElevation,
                                                           tokenElevationPtr, (uint)tokenElevationSize, out unusedSize))
                     {
@@ -663,8 +800,10 @@ namespace Microsoft.Diagnostics.Tracing.Logging
             this.consoleLogger?.Dispose();
 
             this.consoleLogger = new ConsoleLogger();
+            // We always want assert-level events from ourself to go to console, regardless of configuration.
+            configuration.AddSubscription(new EventProviderSubscription(InternalLogger.Write, EventLevel.Critical,
+                                                                        EventKeywords.None));
             configuration.Logger = this.consoleLogger;
-            this.consoleLogger.SubscribeToEvents(InternalLogger.Write, EventLevel.Critical); // means Assert will hit console.
         }
 
         private FileBackedLogger GetNamedFileLogger(string name)

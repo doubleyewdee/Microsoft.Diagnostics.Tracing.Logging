@@ -225,13 +225,9 @@ namespace Microsoft.Diagnostics.Tracing.Logging
             }
             lock (this.loggersLock)
             {
-                if (this.logConfigurations != null)
+                foreach (var log in Configuration.Logs)
                 {
-                    foreach (var kvp in this.logConfigurations)
-                    {
-                        var config = kvp.Value;
-                        config.UpdateForEventSource(eventSource);
-                    }
+                    log.UpdateForEventSource(eventSource);
                 }
             }
         }
