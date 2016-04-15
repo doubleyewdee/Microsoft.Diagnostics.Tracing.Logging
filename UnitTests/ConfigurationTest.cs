@@ -50,7 +50,7 @@ namespace Microsoft.Diagnostics.Tracing.Logging.UnitTests
 <loggers>
   <etwlogging enabled=""true"" />
   <log name=""configFileLogger"" type=""text"">
-    <source name=""Microsoft.Diagnostics.Tracing.Logging"" />
+    <source name=""Microsoft-Diagnostics-Tracing-Logging"" />
   </log>
 </loggers>";
             LogManager.Start();
@@ -80,7 +80,7 @@ namespace Microsoft.Diagnostics.Tracing.Logging.UnitTests
             const string config = @"
 <loggers>
   <log name=""configFileLogger"" type=""text"">
-    <source name=""Microsoft.Diagnostics.Tracing.Logging"" />
+    <source name=""Microsoft-Diagnostics-Tracing-Logging"" />
   </log>
 </loggers>";
             LogManager.Start();
@@ -168,7 +168,7 @@ namespace Microsoft.Diagnostics.Tracing.Logging.UnitTests
             const string config = @"
 <loggers>
   <log name=""subTextLogger"" directory=""undercity"">
-    <source name=""Microsoft.Diagnostics.Tracing.Logging"" />
+    <source name=""Microsoft-Diagnostics-Tracing-Logging"" />
   </log>
 </loggers>";
 
@@ -191,7 +191,7 @@ namespace Microsoft.Diagnostics.Tracing.Logging.UnitTests
             const string config = @"
 <loggers>
   <log name=""textLogger"">
-    <source name=""Microsoft.Diagnostics.Tracing.Logging"" />
+    <source name=""Microsoft-Diagnostics-Tracing-Logging"" />
   </log>
 </loggers>";
 
@@ -240,6 +240,7 @@ namespace Microsoft.Diagnostics.Tracing.Logging.UnitTests
             Assert.IsTrue(LogManager.SetConfiguration(
                                                       @"<loggers>
 <etwlogging enabled=""true"" />
+<log name=""somelog""><source name=""Microsoft-Diagnostics-Tracing-Logging"" /></log>
 </loggers>"));
             Assert.AreEqual(Configuration.AllowEtwLoggingValues.Enabled, LogManager.Configuration.AllowEtwLogging);
 
@@ -248,6 +249,7 @@ namespace Microsoft.Diagnostics.Tracing.Logging.UnitTests
             Assert.IsTrue(LogManager.SetConfiguration(
                                                       @"<loggers>
 <etwlogging enabled=""False"" />
+<log name=""somelog""><source name=""Microsoft-Diagnostics-Tracing-Logging"" /></log>
 </loggers>"));
             Assert.AreEqual(Configuration.AllowEtwLoggingValues.Disabled, LogManager.Configuration.AllowEtwLogging);
             LogManager.Shutdown();
@@ -283,7 +285,7 @@ namespace Microsoft.Diagnostics.Tracing.Logging.UnitTests
             const string config = @"
 <loggers>
   <log name=""testLogger"" type=""text"">
-    <source name=""Microsoft.Diagnostics.Tracing.Logging"" />
+    <source name=""Microsoft-Diagnostics-Tracing-Logging"" />
   </log>
 </loggers>";
             LogManager.Configuration.AllowEtwLogging = Configuration.AllowEtwLoggingValues.Enabled;
@@ -309,9 +311,8 @@ namespace Microsoft.Diagnostics.Tracing.Logging.UnitTests
             Assert.IsTrue(LogManager.IsConfigurationValid(null));
             Assert.IsTrue(LogManager.IsConfigurationValid(""));
 
-            // basic strings (it's okay to have no loggers but you still need to be valid XML!)
+            // basic strings nonsense.
             Assert.IsFalse(LogManager.IsConfigurationValid("can haz xml?"));
-            Assert.IsTrue(LogManager.IsConfigurationValid("<loggers />"));
 
             // Every log must have at least one source, but it need not exist at time of config parse.
             Assert.IsFalse(LogManager.IsConfigurationValid("<loggers><log name=\"nosource\" /></loggers>"));
@@ -320,24 +321,24 @@ namespace Microsoft.Diagnostics.Tracing.Logging.UnitTests
                                                           "<loggers><log name=\"hazsource\"><source name=\"SomeRandomSource\" /></log></loggers>"));
             Assert.IsTrue(
                           LogManager.IsConfigurationValid(
-                                                          "<loggers><log name=\"hazsource\"><source name=\"Microsoft.Diagnostics.Tracing.Logging\" /></log></loggers>"));
+                                                          "<loggers><log name=\"hazsource\"><source name=\"Microsoft-Diagnostics-Tracing-Logging\" /></log></loggers>"));
 
             // Log types need to be valid.
             Assert.IsFalse(
                            LogManager.IsConfigurationValid(
-                                                           "<loggers><log name=\"typed\" type=\"foo\"><source name=\"Microsoft.Diagnostics.Tracing.Logging\" /></log></loggers>"));
+                                                           "<loggers><log name=\"typed\" type=\"foo\"><source name=\"Microsoft-Diagnostics-Tracing-Logging\" /></log></loggers>"));
             Assert.IsTrue(
                           LogManager.IsConfigurationValid(
-                                                          "<loggers><log name=\"typed\" type=\"etl\"><source name=\"Microsoft.Diagnostics.Tracing.Logging\" /></log></loggers>"));
+                                                          "<loggers><log name=\"typed\" type=\"etl\"><source name=\"Microsoft-Diagnostics-Tracing-Logging\" /></log></loggers>"));
             Assert.IsTrue(
                           LogManager.IsConfigurationValid(
-                                                          "<loggers><log name=\"typed\" type=\"etw\"><source name=\"Microsoft.Diagnostics.Tracing.Logging\" /></log></loggers>"));
+                                                          "<loggers><log name=\"typed\" type=\"etw\"><source name=\"Microsoft-Diagnostics-Tracing-Logging\" /></log></loggers>"));
             Assert.IsTrue(
                           LogManager.IsConfigurationValid(
-                                                          "<loggers><log name=\"typed\" type=\"text\"><source name=\"Microsoft.Diagnostics.Tracing.Logging\" /></log></loggers>"));
+                                                          "<loggers><log name=\"typed\" type=\"text\"><source name=\"Microsoft-Diagnostics-Tracing-Logging\" /></log></loggers>"));
             Assert.IsTrue(
                           LogManager.IsConfigurationValid(
-                                                          "<loggers><log name=\"typed\" type=\"txt\"><source name=\"Microsoft.Diagnostics.Tracing.Logging\" /></log></loggers>"));
+                                                          "<loggers><log name=\"typed\" type=\"txt\"><source name=\"Microsoft-Diagnostics-Tracing-Logging\" /></log></loggers>"));
 
             // All log names need to be valid filenames
             Assert.IsFalse(

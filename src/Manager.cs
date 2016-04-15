@@ -102,12 +102,12 @@ namespace Microsoft.Diagnostics.Tracing.Logging
 
         private void ApplyConfiguration()
         {
-            Configuration.Reset();
-            Configuration.Merge(this.fileConfiguration);
-            Configuration.Merge(this.processConfiguration);
-
             lock (this.loggersLock)
             {
+                Configuration.Clear();
+                Configuration.Merge(this.fileConfiguration);
+                Configuration.Merge(this.processConfiguration);
+
                 foreach (var logger in this.fileLoggers.Values)
                 {
                     logger.Dispose();
@@ -324,7 +324,8 @@ namespace Microsoft.Diagnostics.Tracing.Logging
         public static void Shutdown()
         {
             singleton?.Dispose();
-            Configuration.Reset();
+            Configuration.Clear();
+            Configuration.AllowEtwLogging = Configuration.AllowEtwLoggingValues.None;
         }
 
         /// <summary>

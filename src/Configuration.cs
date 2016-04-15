@@ -74,7 +74,7 @@ namespace Microsoft.Diagnostics.Tracing.Logging
             Enabled
         }
 
-        private readonly List<LogConfiguration> logs;
+        private readonly HashSet<LogConfiguration> logs;
 
         /// <summary>
         /// Construct a new Configuration object.
@@ -94,7 +94,7 @@ namespace Microsoft.Diagnostics.Tracing.Logging
             }
 
             this.AllowEtwLogging = allowLogging;
-            this.logs = new List<LogConfiguration>(logs);
+            this.logs = new HashSet<LogConfiguration>(logs);
             if (this.logs.Count == 0)
             {
                 throw new ArgumentException("No log configurations provided.", nameof(logs));
@@ -124,15 +124,15 @@ namespace Microsoft.Diagnostics.Tracing.Logging
         internal Configuration()
         {
             this.AllowEtwLogging = AllowEtwLoggingValues.None;
-            this.logs = new List<LogConfiguration>();
+            this.logs = new HashSet<LogConfiguration>();
         }
 
         /// <summary>
         /// Whether or not to allow ETW logging.
         /// </summary>
         /// <remarks>
-        /// The priority of values is: disabled &gt; enabled &gt; none. When configurations are combined internally the
-        /// highest-priority value will be used. The default is <see cref="AllowEtwLoggingValues.None"/>/
+        /// The priority of values is: disabled OR enabled &gt; none. When configurations are combined internally the
+        /// most recent value will be used.
         /// 
         /// Why do this? Many users in a "single box" scenario aren't ready to deal with the overhead of ETW. ETW creates
         /// files locked to the kernel which, when a process is improperly terminated, just stay open. For many folks not
@@ -148,26 +148,6 @@ namespace Microsoft.Diagnostics.Tracing.Logging
         /// </summary>
         public IEnumerable<LogConfiguration> Logs => this.logs;
 
-        /// <summary>
-        /// Returns the actual LogConfiguration object used (may not be the same as the configuration provided).
-        /// </summary>
-        /// <param name="newLog"></param>
-        /// <returns></returns>
-        internal LogConfiguration AddLogConfiguration(LogConfiguration newLog)
-        {
-            var log = this.logs.FirstOrDefault(l => l.Equals(newLog));
-            if (log != null)
-            {
-                log.Merge(newLog);
-            }
-            else
-            {
-                this.logs.Add(newLog);
-            }
-
-            return log ?? newLog;
-        }
-
         internal void Merge(Configuration other)
         {
             if (other == null)
@@ -175,17 +155,9 @@ namespace Microsoft.Diagnostics.Tracing.Logging
                 return;
             }
 
-            switch (this.AllowEtwLogging)
+            if (other.AllowEtwLogging != AllowEtwLoggingValues.None)
             {
-            case AllowEtwLoggingValues.None:
                 this.AllowEtwLogging = other.AllowEtwLogging;
-                break;
-            case AllowEtwLoggingValues.Enabled:
-                if (other.AllowEtwLogging == AllowEtwLoggingValues.Disabled)
-                {
-                    this.AllowEtwLogging = AllowEtwLoggingValues.Disabled;
-                }
-                break;
             }
 
             foreach (var otherLog in other.logs)
@@ -193,23 +165,20 @@ namespace Microsoft.Diagnostics.Tracing.Logging
                 var log = this.logs.FirstOrDefault(l => l.Equals(otherLog));
                 if (log != null)
                 {
-                    log.Merge(otherLog);
+                    this.logs.Remove(log);
+                    otherLog.Merge(log);
                 }
-                else
-                {
-                    this.logs.Add(otherLog);
-                }
+                this.logs.Add(otherLog);
             }
 
             this.ApplyEtwLoggingSettings();
         }
 
         /// <summary>
-        /// Reset the object state (useful for the global configuration singleton on startup/shutdown)
+        /// Clear all existing logs (useful during reloads / shutdown scenarios)
         /// </summary>
-        internal void Reset()
+        internal void Clear()
         {
-            this.AllowEtwLogging = AllowEtwLoggingValues.None;
             this.logs.Clear();
         }
 
@@ -394,7 +363,7 @@ namespace Microsoft.Diagnostics.Tracing.Logging
                 }
             }
 
-            configuration = new Configuration(logs, allowEtwLogging);
+            configuration = logs.Count > 0 ? new Configuration(logs, allowEtwLogging) : null;
             return clean;
         }
 

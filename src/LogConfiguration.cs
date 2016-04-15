@@ -307,16 +307,12 @@ namespace Microsoft.Diagnostics.Tracing.Logging
 
         private bool Equals(LogConfiguration other)
         {
-            return string.Equals(this.Name, other.Name, StringComparison.OrdinalIgnoreCase) && this.Type == other.Type;
+            return string.Equals(this.Name, other.Name, StringComparison.OrdinalIgnoreCase);
         }
 
         public override int GetHashCode()
         {
-            unchecked
-            {
-                return ((this.Name != null ? StringComparer.OrdinalIgnoreCase.GetHashCode(this.Name) : 0) * 397) ^
-                       (int)this.Type;
-            }
+            return StringComparer.OrdinalIgnoreCase.GetHashCode(this.Name);
         }
 
         /// <summary>

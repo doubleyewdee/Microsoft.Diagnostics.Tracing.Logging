@@ -46,10 +46,26 @@ namespace Microsoft.Diagnostics.Tracing.Logging
             else if (providerID != Guid.Empty)
             {
                 this.ProviderID = providerID;
+                if (this.Source == null)
+                {
+                    var eventSource = LogManager.FindEventSource(providerID);
+                    if (eventSource != null)
+                    {
+                        this.UpdateSource(eventSource);
+                    }
+                }
             }
             else if (!string.IsNullOrWhiteSpace(name))
             {
                 this.Name = name;
+                if (this.Source == null && this.ProviderID == Guid.Empty)
+                {
+                    var eventSource = LogManager.FindEventSource(name);
+                    if (eventSource != null)
+                    {
+                        this.UpdateSource(eventSource);
+                    }
+                }
             }
             else
             {

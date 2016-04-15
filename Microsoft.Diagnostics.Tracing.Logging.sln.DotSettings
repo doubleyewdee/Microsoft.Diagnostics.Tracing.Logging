@@ -46,7 +46,7 @@
 	<s:Boolean x:Key="/Default/CodeStyle/CSharpUsing/QualifiedUsingAtNestedScope/@EntryValue">True</s:Boolean>
 	<s:String x:Key="/Default/CodeStyle/FileHeader/FileHeaderText/@EntryValue">The MIT License (MIT)&#xD;
 &#xD;
-Copyright (c) 2015 Microsoft&#xD;
+Copyright (c) 2015-2016 Microsoft&#xD;
 &#xD;
 Permission is hereby granted, free of charge, to any person obtaining a copy&#xD;
 of this software and associated documentation files (the "Software"), to deal&#xD;
