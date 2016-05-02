@@ -26,6 +26,7 @@ namespace Microsoft.Diagnostics.Tracing.Logging
     using System.Collections.Generic;
     using System.Diagnostics.Tracing;
     using System.Globalization;
+    using System.IO;
     using System.Linq;
     using System.Xml;
 
@@ -94,19 +95,26 @@ namespace Microsoft.Diagnostics.Tracing.Logging
             }
 
             this.AllowEtwLogging = allowLogging;
-            this.logs = new HashSet<LogConfiguration>(logs);
-            if (this.logs.Count == 0)
+            this.logs = new HashSet<LogConfiguration>();
+            foreach (var log in logs)
             {
-                throw new ArgumentException("No log configurations provided.", nameof(logs));
-            }
-
-            var logSet = new HashSet<LogConfiguration>();
-            foreach (var log in this.Logs)
-            {
-                if (!logSet.Add(log))
+                if (!log.IsValid)
+                {
+                    throw new InvalidConfigurationException($"log {log.Name} is not valid.");
+                }
+                if (log.Type == LogType.MemoryBuffer)
+                {
+                    // TODO: enable named memory logs in LogManager.
+                    throw new InvalidConfigurationException("Memory logs are not currently supported.");
+                }
+                if (!this.logs.Add(log))
                 {
                     throw new InvalidConfigurationException($"Duplicate log {log.Name}, {log.Type} not allowed.");
                 }
+            }
+            if (this.logs.Count == 0)
+            {
+                throw new ArgumentException("No log configurations provided.", nameof(logs));
             }
 
             this.ApplyEtwLoggingSettings();
@@ -172,6 +180,16 @@ namespace Microsoft.Diagnostics.Tracing.Logging
             }
 
             this.ApplyEtwLoggingSettings();
+        }
+
+        public override string ToString()
+        {
+            var serializer = new JsonSerializer();
+            using (var writer = new StringWriter())
+            {
+                serializer.Serialize(writer, this);
+                return writer.ToString();
+            }
         }
 
         /// <summary>
@@ -317,7 +335,7 @@ namespace Microsoft.Diagnostics.Tracing.Logging
                 }
                 else
                 {
-                    type = LogConfiguration.StringToLogType(log.Attributes[LogTypeAttribute].Value);
+                    type = log.Attributes[LogTypeAttribute].Value.ToLogType();
                 }
 
                 if (type == LogType.None)
@@ -342,19 +360,24 @@ namespace Microsoft.Diagnostics.Tracing.Logging
                 // using this capability and, since it confusing at best, would like for it to go away.
                 try
                 {
-                    LogConfiguration config;
-                    config = new LogConfiguration(name, type);
+                    List<EventProviderSubscription> subscriptions;
+                    List<string> filters;
+
+                    clean &= ParseLogSources(log, out subscriptions);
+                    ParseLogFilters(log, out filters);
+                    var config = new LogConfiguration(name, type, subscriptions, filters);
 
                     clean &= ParseLogNode(log, config);
 
-                    if (config.SubscriptionCount == 0)
+                    if (!config.IsValid)
                     {
-                        InternalLogger.Write.InvalidConfiguration($"log destination {config.Name} has no sources.");
-                        clean = false;
-                        continue;
+                        InternalLogger.Write.InvalidConfiguration($"log {log.Name} is not valid.");
                     }
-
-                    logs.Add(config);
+                    if (!logs.Add(config))
+                    {
+                        InternalLogger.Write.InvalidConfiguration($"duplicate log {log.Name} discarded.");
+                        clean = false;
+                    }
                 }
                 catch (InvalidConfigurationException e)
                 {
@@ -401,21 +424,18 @@ namespace Microsoft.Diagnostics.Tracing.Logging
                 }
                 catch (Exception e) when (e is FormatException || e is OverflowException)
                 {
-                    throw new InvalidConfigurationException(
-                        $"Attribute {logAttribute.Name} has invalid value {logAttribute.Value}",
-                        e);
+                    InternalLogger.Write.InvalidConfiguration($"Attribute {logAttribute.Name} has invalid value {logAttribute.Value} ({e.GetType()}: {e.Message})");
+                    clean = false;
                 }
             }
 
-            clean &= ParseLogSources(xmlNode, config);
-            clean &= ParseLogFilters(xmlNode, config);
             return clean;
         }
 
-        private static bool ParseLogSources(XmlNode xmlNode, LogConfiguration config)
+        private static bool ParseLogSources(XmlNode xmlNode, out List<EventProviderSubscription> subscriptions)
         {
-            bool clean = true;
-
+            var clean = true;
+            subscriptions = new List<EventProviderSubscription>();
             foreach (XmlNode source in xmlNode.SelectNodes(SourceTag))
             {
                 string sourceName = null;
@@ -464,11 +484,11 @@ namespace Microsoft.Diagnostics.Tracing.Logging
 
                 if (sourceProvider != Guid.Empty)
                 {
-                    config.AddSubscription(new EventProviderSubscription(sourceProvider, level, (EventKeywords)keywords));
+                    subscriptions.Add(new EventProviderSubscription(sourceProvider, level, (EventKeywords)keywords));
                 }
                 else if (!string.IsNullOrEmpty(sourceName))
                 {
-                    config.AddSubscription(new EventProviderSubscription(sourceName, level, (EventKeywords)keywords));
+                    subscriptions.Add(new EventProviderSubscription(sourceName, level, (EventKeywords)keywords));
                 }
                 else
                 {
@@ -480,24 +500,13 @@ namespace Microsoft.Diagnostics.Tracing.Logging
             return clean;
         }
 
-        private static bool ParseLogFilters(XmlNode xmlNode, LogConfiguration config)
+        private static void ParseLogFilters(XmlNode xmlNode, out List<string> regexFilters)
         {
-            bool clean = true;
-
-            foreach (XmlNode source in xmlNode.SelectNodes(LogFilterTag))
+            regexFilters = new List<string>();
+            foreach (XmlNode filter in xmlNode.SelectNodes(LogFilterTag))
             {
-                try
-                {
-                    config.AddFilter(source.InnerText);
-                }
-                catch (InvalidConfigurationException e)
-                {
-                    InternalLogger.Write.InvalidConfiguration(e.Message);
-                    clean = false;
-                }
+                regexFilters.Add(filter.InnerText);
             }
-
-            return clean;
         }
 
         // HEY! HEY YOU! Are you adding stuff here? You're adding stuff, it's cool. Just go update

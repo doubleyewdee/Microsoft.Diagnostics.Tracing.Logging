@@ -1,6 +1,6 @@
 ﻿// The MIT License (MIT)
 // 
-// Copyright (c) 2015 Microsoft
+// Copyright (c) 2015-2016 Microsoft
 // 
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -22,11 +22,16 @@
 
 namespace Microsoft.Diagnostics.Tracing.Logging.UnitTests
 {
+    using System;
+    using System.Collections.Generic;
     using System.Diagnostics.Tracing;
     using System.IO;
+    using System.Linq;
     using System.Threading;
 
     using Microsoft.Diagnostics.Tracing.Session;
+
+    using Newtonsoft.Json;
 
     using NUnit.Framework;
 
@@ -42,6 +47,159 @@ namespace Microsoft.Diagnostics.Tracing.Logging.UnitTests
             }
         }
 
+        private static IEnumerable<Configuration> SerializedConfigurations
+        {
+            get
+            {
+                var consoleLog = new LogConfiguration(null, LogType.Console, LogManager.DefaultSubscriptions);
+                var fileLog = new LogConfiguration("somefile", LogType.Text, new[]
+                                                                             {
+                                                                                 new EventProviderSubscription(
+                                                                                     InternalLogger.Write,
+                                                                                     EventLevel.Verbose, 0xdeadbeef),
+                                                                             });
+                foreach (var value in Enum.GetValues(typeof(Configuration.AllowEtwLoggingValues)))
+                {
+                    var config = new Configuration(new[] {consoleLog, fileLog});
+                    config.AllowEtwLogging = (Configuration.AllowEtwLoggingValues)value;
+                    yield return config;
+                }
+            }
+        }
+
+        [Test, TestCaseSource(nameof(SerializedConfigurations))]
+        public void CanSerialize(Configuration configuration)
+        {
+            var serializer = new JsonSerializer();
+            var json = configuration.ToString(); // ToString returns the JSON representation itself.
+            using (var reader = new StringReader(json))
+            {
+                using (var jsonReader = new JsonTextReader(reader))
+                {
+                    var deserialized = serializer.Deserialize<Configuration>(jsonReader);
+                    Assert.AreEqual(configuration.AllowEtwLogging, deserialized.AllowEtwLogging);
+                    Assert.AreEqual(configuration.Logs.Count(), deserialized.Logs.Count());
+                    foreach (var log in configuration.Logs)
+                    {
+                        Assert.IsTrue(deserialized.Logs.Contains(log));
+                    }
+                }
+            }
+        }
+
+        [Test]
+        public void ConstructorValidation()
+        {
+            var validLogConfigs = new[] {new LogConfiguration(null, LogType.Console, LogManager.DefaultSubscriptions),};
+
+            foreach (var value in Enum.GetValues(typeof(Configuration.AllowEtwLoggingValues)))
+            {
+                var validValue = (Configuration.AllowEtwLoggingValues)value;
+                Assert.DoesNotThrow(() => new Configuration(validLogConfigs, validValue));
+            }
+            var invalidAllowValue =
+                (Configuration.AllowEtwLoggingValues)((int)Configuration.AllowEtwLoggingValues.Enabled + 8675309);
+            Assert.Throws<ArgumentOutOfRangeException>(() => new Configuration(validLogConfigs, invalidAllowValue));
+
+            Assert.Throws<ArgumentNullException>(() => new Configuration(null));
+            Assert.Throws<ArgumentException>(() => new Configuration(new LogConfiguration[0]));
+
+            var invalidConfig = new LogConfiguration("foo", LogType.Network, LogManager.DefaultSubscriptions);
+            Assert.IsFalse(invalidConfig.IsValid);
+            var invalidLogConfigs = new List<LogConfiguration>(validLogConfigs);
+            invalidLogConfigs.Add(invalidConfig);
+            Assert.Throws<InvalidConfigurationException>(() => new Configuration(invalidLogConfigs));
+
+            var duplicateLogConfigs = new List<LogConfiguration>(validLogConfigs);
+            duplicateLogConfigs.AddRange(validLogConfigs);
+            Assert.Throws<InvalidConfigurationException>(() => new Configuration(duplicateLogConfigs));
+
+            var memoryLogs = new[]
+                             {new LogConfiguration("memory", LogType.MemoryBuffer, LogManager.DefaultSubscriptions),};
+            Assert.Throws<InvalidConfigurationException>(() => new Configuration(memoryLogs));
+        }
+
+        [Test]
+        public void MergeCombinesLogsAndSettings()
+        {
+            var leftLogConfig = new[]
+                                {
+                                    new LogConfiguration("left", LogType.Text, LogManager.DefaultSubscriptions),
+                                    new LogConfiguration("middle", LogType.EventTracing, LogManager.DefaultSubscriptions),
+                                };
+            var leftConfig = new Configuration(leftLogConfig, Configuration.AllowEtwLoggingValues.None);
+
+            var rightLogConfig = new[]
+                                 {
+                                     new LogConfiguration("middle", LogType.Text,
+                                                          LogManager.DefaultSubscriptions),
+                                     new LogConfiguration("right", LogType.Network, LogManager.DefaultSubscriptions)
+                                     {Hostname = "foo", Port = 5309},
+                                 };
+            var rightConfig = new Configuration(rightLogConfig, Configuration.AllowEtwLoggingValues.Enabled);
+
+            leftConfig.Merge(rightConfig);
+            Assert.AreEqual(rightConfig.AllowEtwLogging, leftConfig.AllowEtwLogging);
+            Assert.AreEqual(3, leftConfig.Logs.Count());
+            foreach (var log in leftConfig.Logs)
+            {
+                if (log.Name == "left")
+                {
+                    Assert.AreEqual(LogType.Text, log.Type);
+                }
+                else if (log.Name == "middle")
+                {
+                    Assert.AreEqual(LogType.Text, log.Type);
+                }
+                else if (log.Name == "right")
+                {
+                    Assert.AreEqual(LogType.Network, log.Type);
+                }
+                else
+                {
+                    Assert.Fail("Unexpected log encountered.");
+                }
+            }
+        }
+
+        [Test]
+        public void MergeDisablingEtwLoggingModifiesExistingLogs()
+        {
+            var leftLogConfig = new[]
+                                {
+                                    new LogConfiguration("left", LogType.EventTracing, LogManager.DefaultSubscriptions),
+                                };
+            var leftConfig = new Configuration(leftLogConfig, Configuration.AllowEtwLoggingValues.None);
+
+            var rightLogConfig = new[]
+                                 {
+                                     new LogConfiguration("right", LogType.Network, LogManager.DefaultSubscriptions)
+                                     {Hostname = "foo", Port = 5309},
+                                 };
+            var rightConfig = new Configuration(rightLogConfig, Configuration.AllowEtwLoggingValues.Disabled);
+
+            leftConfig.Merge(rightConfig);
+            Assert.AreEqual(rightConfig.AllowEtwLogging, leftConfig.AllowEtwLogging);
+            Assert.AreEqual(2, leftConfig.Logs.Count());
+            var etwLog = leftConfig.Logs.First(l => l.Name == "left");
+            Assert.AreEqual(LogType.Text, etwLog.Type);
+        }
+
+        [Test]
+        public void ClearRemovesLogsButNotSettings()
+        {
+            var config =
+                new Configuration(new[] {new LogConfiguration(null, LogType.Console, LogManager.DefaultSubscriptions),},
+                                  Configuration.AllowEtwLoggingValues.Enabled);
+            Assert.AreNotEqual(0, config.Logs.Count());
+            Assert.AreEqual(Configuration.AllowEtwLoggingValues.Enabled, config.AllowEtwLogging);
+            config.Clear();
+            Assert.AreEqual(0, config.Logs.Count());
+            Assert.AreEqual(Configuration.AllowEtwLoggingValues.Enabled, config.AllowEtwLogging);
+        }
+
+        #region legacy XML tests
+#pragma warning disable 618
         [Test]
         public void CompoundConfiguration()
         {
@@ -157,7 +315,7 @@ namespace Microsoft.Diagnostics.Tracing.Logging.UnitTests
             var session = new TraceEventSession(ETLFileLogger.SessionPrefix + "etwLogger",
                                                 TraceEventSessionOptions.Attach);
             Assert.IsNotNull(session);
-            Assert.AreEqual(LogManager.DefaultFileBufferSizeMB, session.BufferSizeMB);
+            Assert.AreEqual(LogManager.DefaultLogBufferSizeMB, session.BufferSizeMB);
             session.Dispose();
             LogManager.Shutdown();
         }
@@ -507,5 +665,7 @@ namespace Microsoft.Diagnostics.Tracing.Logging.UnitTests
                                                            "<loggers><log name=\"hazfilter\" type=\"etw\"><source name=\"Microsoft.Diagnostics.Tracing.logging\"/><filter>hello</filter></log></loggers>"));
             LogManager.Shutdown();
         }
+#pragma warning restore 618
+        #endregion
     }
 }

@@ -7,6 +7,8 @@ came from.
   in step with the `Microsoft.Diagnostics.Tracing` package.
 * BREAKING: `AllowEtwLogging` settings to forcefully disable use of ETW logs now controlled through
   `LogManager.Configuration` object (variable on `LogManager` has been removed).
+* BREAKING: The min/max/default `FileBufferSizeMB` values on `LogManager` are now
+  named `[foo]LogBufferSizeMB` instead to reflect their potential use in non-file logs.
 * BREAKING: Several functions were obsoleted with preferable replacements, particularly in terms of using
   the manager to create/find/close loggers and manipulate configuration.
   * Basically creating a logger is now done using the new `LogConfiguration` type which can be used

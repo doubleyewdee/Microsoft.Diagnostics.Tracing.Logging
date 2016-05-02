@@ -1,6 +1,6 @@
 ﻿// The MIT License (MIT)
 // 
-// Copyright (c) 2015 Microsoft
+// Copyright (c) 2015-2016 Microsoft
 // 
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -22,6 +22,8 @@
 
 namespace Microsoft.Diagnostics.Tracing.Logging.UnitTests
 {
+    using System;
+    using System.Diagnostics.Tracing;
     using System.IO;
 
     using Newtonsoft.Json;
@@ -33,7 +35,16 @@ namespace Microsoft.Diagnostics.Tracing.Logging.UnitTests
     {
         private static readonly EventProviderSubscription[] Subscriptions =
         {
-            new EventProviderSubscription("UnknownProvider")
+            new EventProviderSubscription("UnknownProvider"),
+            new EventProviderSubscription(InternalLogger.Write.Name),
+            new EventProviderSubscription(InternalLogger.Write.Name, EventLevel.Warning),
+            new EventProviderSubscription(InternalLogger.Write.Name, EventLevel.Warning, (EventKeywords)0xdeadbeef),
+            new EventProviderSubscription(InternalLogger.Write),
+            new EventProviderSubscription(InternalLogger.Write, EventLevel.Warning),
+            new EventProviderSubscription(InternalLogger.Write, EventLevel.Warning, (EventKeywords)0xdeadbeef),
+            new EventProviderSubscription(InternalLogger.Write.Guid),
+            new EventProviderSubscription(InternalLogger.Write.Guid, EventLevel.Warning),
+            new EventProviderSubscription(InternalLogger.Write.Guid, EventLevel.Warning, (EventKeywords)0xdeadbeef)
         };
 
         [Test, TestCaseSource(nameof(Subscriptions))]
@@ -42,11 +53,28 @@ namespace Microsoft.Diagnostics.Tracing.Logging.UnitTests
             var serializer = new JsonSerializer();
             var json = subscription.ToString(); // ToString returns the JSON representation itself.
             using (var reader = new StringReader(json))
-            using (var jsonReader = new JsonTextReader(reader))
             {
-                var deserialized = serializer.Deserialize<EventProviderSubscription>(jsonReader);
-                Assert.AreEqual(subscription, deserialized);
+                using (var jsonReader = new JsonTextReader(reader))
+                {
+                    var deserialized = serializer.Deserialize<EventProviderSubscription>(jsonReader);
+                    Assert.AreEqual(subscription, deserialized);
+                    Assert.AreEqual(subscription.Name, deserialized.Name);
+                    Assert.AreEqual(subscription.Source, deserialized.Source);
+                    Assert.AreEqual(subscription.ProviderID, deserialized.ProviderID);
+                    Assert.AreEqual(subscription.Keywords, deserialized.Keywords);
+                    Assert.AreEqual(subscription.MinimumLevel, deserialized.MinimumLevel);
+                }
             }
+        }
+
+        [Test]
+        public void InvalidConstructorParametersThrowException()
+        {
+            Assert.Throws<ArgumentException>(() => new EventProviderSubscription((string)null));
+            Assert.Throws<ArgumentException>(() => new EventProviderSubscription(string.Empty));
+            Assert.Throws<ArgumentException>(() => new EventProviderSubscription("   "));
+            Assert.Throws<ArgumentException>(() => new EventProviderSubscription((EventSource)null));
+            Assert.Throws<ArgumentException>(() => new EventProviderSubscription(Guid.Empty));
         }
     }
 }

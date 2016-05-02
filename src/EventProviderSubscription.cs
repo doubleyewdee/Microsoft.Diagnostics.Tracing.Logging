@@ -1,6 +1,6 @@
 // The MIT License (MIT)
 // 
-// Copyright (c) 2015 Microsoft
+// Copyright (c) 2015-2016 Microsoft
 // 
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -69,7 +69,7 @@ namespace Microsoft.Diagnostics.Tracing.Logging
             }
             else
             {
-                throw new InvalidOperationException(
+                throw new ArgumentException(
                     "Must provider at least one of name / EventSource / ProviderID for subscription.");
             }
 
@@ -89,9 +89,26 @@ namespace Microsoft.Diagnostics.Tracing.Logging
         /// </summary>
         /// <param name="source">Source object to use.</param>
         /// <param name="minimumLevel">Minimum severity level of events to subscribe to.</param>
+        public EventProviderSubscription(EventSource source, EventLevel minimumLevel)
+            : this(null, source, source.Guid, minimumLevel, EventKeywords.None) { }
+
+        /// <summary>
+        /// Construct a new EventSourceSubscription object based on a provided EventSource.
+        /// </summary>
+        /// <param name="source">Source object to use.</param>
+        /// <param name="minimumLevel">Minimum severity level of events to subscribe to.</param>
         /// <param name="keywords">Keywords to match events against.</param>
         public EventProviderSubscription(EventSource source, EventLevel minimumLevel, EventKeywords keywords)
             : this(null, source, source.Guid, minimumLevel, keywords) { }
+
+        /// <summary>
+        /// Construct a new EventSourceSubscription object based on a provided EventSource.
+        /// </summary>
+        /// <param name="source">Source object to use.</param>
+        /// <param name="minimumLevel">Minimum severity level of events to subscribe to.</param>
+        /// <param name="keywords">Keywords to match events against.</param>
+        public EventProviderSubscription(EventSource source, EventLevel minimumLevel, ulong keywords)
+            : this(null, source, source.Guid, minimumLevel, (EventKeywords)keywords) { }
 
         /// <summary>
         /// Construct a new EventSourceSubscription object based on an ETW provider GUID.
@@ -105,9 +122,26 @@ namespace Microsoft.Diagnostics.Tracing.Logging
         /// </summary>
         /// <param name="providerID">GUID of the desired event provider.</param>
         /// <param name="minimumLevel">Minimum severity level of events to subscribe to.</param>
+        public EventProviderSubscription(Guid providerID, EventLevel minimumLevel)
+            : this(null, null, providerID, minimumLevel, EventKeywords.None) { }
+
+        /// <summary>
+        /// Construct a new EventSourceSubscription object based on an ETW provider GUID.
+        /// </summary>
+        /// <param name="providerID">GUID of the desired event provider.</param>
+        /// <param name="minimumLevel">Minimum severity level of events to subscribe to.</param>
         /// <param name="keywords">Keywords to match events against.</param>
         public EventProviderSubscription(Guid providerID, EventLevel minimumLevel, EventKeywords keywords)
             : this(null, null, providerID, minimumLevel, keywords) { }
+
+        /// <summary>
+        /// Construct a new EventSourceSubscription object based on an ETW provider GUID.
+        /// </summary>
+        /// <param name="providerID">GUID of the desired event provider.</param>
+        /// <param name="minimumLevel">Minimum severity level of events to subscribe to.</param>
+        /// <param name="keywords">Keywords to match events against.</param>
+        public EventProviderSubscription(Guid providerID, EventLevel minimumLevel, ulong keywords)
+            : this(null, null, providerID, minimumLevel, (EventKeywords)keywords) { }
 
         /// <summary>
         /// Construct a new EventSourceSubscription object based on the name of an EventSource provider.
@@ -121,9 +155,26 @@ namespace Microsoft.Diagnostics.Tracing.Logging
         /// </summary>
         /// <param name="name">Name of the EventSource provider.</param>
         /// <param name="minimumLevel">Minimum severity level of events to subscribe to.</param>
+        public EventProviderSubscription(string name, EventLevel minimumLevel)
+            : this(name, null, Guid.Empty, minimumLevel, EventKeywords.None) { }
+
+        /// <summary>
+        /// Construct a new EventSourceSubscription object based on the name of an EventSource provider.
+        /// </summary>
+        /// <param name="name">Name of the EventSource provider.</param>
+        /// <param name="minimumLevel">Minimum severity level of events to subscribe to.</param>
         /// <param name="keywords">Keywords to match events against.</param>
         public EventProviderSubscription(string name, EventLevel minimumLevel, EventKeywords keywords)
             : this(name, null, Guid.Empty, minimumLevel, keywords) { }
+
+        /// <summary>
+        /// Construct a new EventSourceSubscription object based on the name of an EventSource provider.
+        /// </summary>
+        /// <param name="name">Name of the EventSource provider.</param>
+        /// <param name="minimumLevel">Minimum severity level of events to subscribe to.</param>
+        /// <param name="keywords">Keywords to match events against.</param>
+        public EventProviderSubscription(string name, EventLevel minimumLevel, ulong keywords)
+            : this(name, null, Guid.Empty, minimumLevel, (EventKeywords)keywords) { }
 
         /// <summary>
         /// Keywords to match.
@@ -268,14 +319,14 @@ namespace Microsoft.Diagnostics.Tracing.Logging
                 {
                     minimumLevel = (EventLevel)Enum.Parse(typeof(EventLevel), token.Value<string>(), true);
                 }
-                if (jObject.TryGetValue(ProviderIDProperty, StringComparison.OrdinalIgnoreCase, out token))
+                if (jObject.TryGetValue(KeywordsProperty, StringComparison.OrdinalIgnoreCase, out token))
                 {
                     var value = token.Value<string>().Trim();
                     if (value.StartsWith("0x", StringComparison.OrdinalIgnoreCase))
                     {
                         value = value.Substring(2);
                     }
-                    keywords = (EventKeywords)ulong.Parse(value);
+                    keywords = (EventKeywords)ulong.Parse(value, NumberStyles.HexNumber, CultureInfo.InvariantCulture);
                 }
 
                 return new EventProviderSubscription(name, null, providerID, minimumLevel, keywords);

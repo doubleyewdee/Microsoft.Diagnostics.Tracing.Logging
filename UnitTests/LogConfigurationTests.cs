@@ -24,12 +24,9 @@ namespace Microsoft.Diagnostics.Tracing.Logging.UnitTests
 {
     using System;
     using System.Collections.Generic;
+    using System.Diagnostics.Tracing;
     using System.IO;
     using System.Linq;
-    using System.Runtime.CompilerServices;
-    using System.Runtime.InteropServices;
-
-    using Microsoft.Diagnostics.Tracing.Parsers.FrameworkEventSource;
 
     using Newtonsoft.Json;
 
@@ -115,38 +112,6 @@ namespace Microsoft.Diagnostics.Tracing.Logging.UnitTests
             LogManager.Shutdown();
         }
 
-        [Test, TestCaseSource(nameof(Configurations))]
-        public void CanSerialize(LogConfiguration configuration)
-        {
-            var serializer = new JsonSerializer();
-            var json = configuration.ToString(); // ToString returns the JSON representation itself.
-            using (var reader = new StringReader(json))
-            {
-                using (var jsonReader = new JsonTextReader(reader))
-                {
-                    var deserialized = serializer.Deserialize<LogConfiguration>(jsonReader);
-                    Assert.AreEqual(configuration, deserialized);
-                    Assert.AreEqual(configuration.Name, deserialized.Name);
-                    Assert.AreEqual(configuration.Type, deserialized.Type);
-                    foreach (var sub in configuration.Subscriptions)
-                    {
-                        Assert.IsTrue(deserialized.Subscriptions.Contains(sub));
-                    }
-                    foreach (var filter in configuration.Filters)
-                    {
-                        Assert.IsTrue(deserialized.Filters.Contains(filter));
-                    }
-                    Assert.AreEqual(configuration.BufferSizeMB, deserialized.BufferSizeMB);
-                    Assert.AreEqual(configuration.Directory, deserialized.Directory);
-                    Assert.AreEqual(configuration.FilenameTemplate, deserialized.FilenameTemplate);
-                    Assert.AreEqual(configuration.TimestampLocal, deserialized.TimestampLocal);
-                    Assert.AreEqual(configuration.RotationInterval, deserialized.RotationInterval);
-                    Assert.AreEqual(configuration.Hostname, deserialized.Hostname);
-                    Assert.AreEqual(configuration.Port, deserialized.Port);
-                }
-            }
-        }
-
         public struct ConstructorArgs
         {
             public bool IsValid { get; }
@@ -155,7 +120,8 @@ namespace Microsoft.Diagnostics.Tracing.Logging.UnitTests
             public IEnumerable<EventProviderSubscription> Subs { get; }
             public IEnumerable<string> Filters { get; }
 
-            public ConstructorArgs(bool valid, string name, LogType type, IEnumerable<EventProviderSubscription> subs, IEnumerable<string> filters)
+            public ConstructorArgs(bool valid, string name, LogType type, IEnumerable<EventProviderSubscription> subs,
+                                   IEnumerable<string> filters)
             {
                 this.IsValid = valid;
                 this.Name = name;
@@ -194,6 +160,11 @@ namespace Microsoft.Diagnostics.Tracing.Logging.UnitTests
                                             LogManager.DefaultSubscriptions, null);
                     yield return new ConstructorArgs(true, "foo", logType, LogManager.DefaultSubscriptions, null);
 
+                    var duplicateSubscriptions = new List<EventProviderSubscription>();
+                    duplicateSubscriptions.AddRange(LogManager.DefaultSubscriptions);
+                    duplicateSubscriptions.AddRange(LogManager.DefaultSubscriptions);
+                    yield return new ConstructorArgs(false, "foo", logType, duplicateSubscriptions, null);
+
                     if (logType.HasFeature(LogConfiguration.Features.RegexFilter))
                     {
                         yield return
@@ -209,6 +180,60 @@ namespace Microsoft.Diagnostics.Tracing.Logging.UnitTests
                             new ConstructorArgs(false, "foo" + string.Join("", Path.GetInvalidFileNameChars()), logType,
                                                 LogManager.DefaultSubscriptions, null);
                     }
+                }
+            }
+        }
+
+        private sealed class ProviderOne : EventSource
+        {
+            public static readonly ProviderOne Write = new ProviderOne();
+
+            [Event(1)]
+            public void One(string msg)
+            {
+                this.WriteEvent(1, msg);
+            }
+        }
+
+        private sealed class ProviderTwo : EventSource
+        {
+            public static readonly ProviderTwo Write = new ProviderTwo();
+
+            [Event(2)]
+            public void Two(string msg)
+            {
+                this.WriteEvent(2, msg);
+            }
+        }
+
+        [Test, TestCaseSource(nameof(Configurations))]
+        public void CanSerialize(LogConfiguration configuration)
+        {
+            var serializer = new JsonSerializer();
+            var json = configuration.ToString(); // ToString returns the JSON representation itself.
+            using (var reader = new StringReader(json))
+            {
+                using (var jsonReader = new JsonTextReader(reader))
+                {
+                    var deserialized = serializer.Deserialize<LogConfiguration>(jsonReader);
+                    Assert.AreEqual(configuration, deserialized);
+                    Assert.AreEqual(configuration.Name, deserialized.Name);
+                    Assert.AreEqual(configuration.Type, deserialized.Type);
+                    foreach (var sub in configuration.Subscriptions)
+                    {
+                        Assert.IsTrue(deserialized.Subscriptions.Contains(sub));
+                    }
+                    foreach (var filter in configuration.Filters)
+                    {
+                        Assert.IsTrue(deserialized.Filters.Contains(filter));
+                    }
+                    Assert.AreEqual(configuration.BufferSizeMB, deserialized.BufferSizeMB);
+                    Assert.AreEqual(configuration.Directory, deserialized.Directory);
+                    Assert.AreEqual(configuration.FilenameTemplate, deserialized.FilenameTemplate);
+                    Assert.AreEqual(configuration.TimestampLocal, deserialized.TimestampLocal);
+                    Assert.AreEqual(configuration.RotationInterval, deserialized.RotationInterval);
+                    Assert.AreEqual(configuration.Hostname, deserialized.Hostname);
+                    Assert.AreEqual(configuration.Port, deserialized.Port);
                 }
             }
         }
@@ -230,25 +255,145 @@ namespace Microsoft.Diagnostics.Tracing.Logging.UnitTests
         }
 
         [Test]
+        public void MergeCombinesSourcesAndFilters()
+        {
+            var leftSubs = new[]
+                           {
+                               new EventProviderSubscription(ProviderOne.Write, EventLevel.Warning),
+                               new EventProviderSubscription(InternalLogger.Write, EventLevel.Warning, 0xdead0000)
+                           };
+            var leftFilters = new[] {"abc", "123"};
+            var leftConfig = new LogConfiguration("foo", LogType.Console, leftSubs, leftFilters);
+
+            var rightSubs = new[]
+                            {
+                                new EventProviderSubscription(InternalLogger.Write, EventLevel.Informational, 0xbeef),
+                                new EventProviderSubscription(ProviderTwo.Write, EventLevel.Verbose)
+                            };
+            var rightFilters = new[] {"def", "123"};
+            var rightConfig = new LogConfiguration("foo", LogType.Console, rightSubs, rightFilters);
+
+            leftConfig.Merge(rightConfig);
+            Assert.AreEqual(3, leftConfig.Filters.Count());
+            Assert.Contains("abc", leftConfig.Filters.ToList());
+            Assert.Contains("def", leftConfig.Filters.ToList());
+            Assert.Contains("123", leftConfig.Filters.ToList());
+
+            Assert.AreEqual(3, leftConfig.Subscriptions.Count());
+            foreach (var sub in leftConfig.Subscriptions)
+            {
+                if (sub.Source == ProviderOne.Write)
+                {
+                    Assert.AreEqual(EventLevel.Warning, sub.MinimumLevel);
+                    Assert.AreEqual(0, (ulong)sub.Keywords);
+                }
+                else if (sub.Source == ProviderTwo.Write)
+                {
+                    Assert.AreEqual(EventLevel.Verbose, sub.MinimumLevel);
+                    Assert.AreEqual(0, (ulong)sub.Keywords);
+                }
+                else if (sub.Source == InternalLogger.Write)
+                {
+                    Assert.AreEqual(EventLevel.Informational, sub.MinimumLevel);
+                    Assert.AreEqual(0xdeadbeef, (ulong)sub.Keywords);
+                }
+                else
+                {
+                    Assert.Fail("unexpected provider.");
+                }
+            }
+        }
+
+        [Test]
+        public void NetworkPropertiesRequiredForValidConfiguration()
+        {
+            var config = new LogConfiguration("net", LogType.Network, LogManager.DefaultSubscriptions);
+            Assert.IsFalse(config.IsValid);
+            config.Hostname = "foo";
+            Assert.IsFalse(config.IsValid);
+
+            config = new LogConfiguration("net", LogType.Network, LogManager.DefaultSubscriptions);
+            config.Port = 5309;
+            Assert.IsFalse(config.IsValid);
+            config.Hostname = "foo";
+            Assert.IsTrue(config.IsValid);
+        }
+
+        [Test]
+        public void PropertyChangeFailsAfterLogCreated()
+        {
+            LogManager.Start();
+
+            var fileExpr = new Action<LogConfiguration>[]
+                           {
+                               c => c.Type = LogType.Text,
+                               c => c.BufferSizeMB = LogManager.DefaultLogBufferSizeMB,
+                               c => c.Directory = ".",
+                               c => c.FilenameTemplate = LogManager.DefaultFilenameTemplate,
+                               c => c.RotationInterval = 3600,
+                               c => c.TimestampLocal = true
+                           };
+            var netExpr = new Action<LogConfiguration>[]
+                          {
+                              c => c.Type = LogType.Network,
+                              c => c.Hostname = "foo",
+                              c => c.Port = 5309,
+                              c => c.BufferSizeMB = LogManager.DefaultLogBufferSizeMB,
+                              c => c.TimestampLocal = true
+                          };
+
+            var fileConfig = new LogConfiguration("foo", LogType.EventTracing, LogManager.DefaultSubscriptions);
+            foreach (var expr in fileExpr)
+            {
+                Assert.DoesNotThrow(() => expr(fileConfig));
+            }
+            var myLog = LogManager.CreateLogger(fileConfig);
+            foreach (var expr in fileExpr)
+            {
+                Assert.Throws<InvalidOperationException>(() => expr(fileConfig));
+            }
+            LogManager.DestroyLogger(myLog);
+
+            var netConfig = new LogConfiguration("foo", LogType.Network, LogManager.DefaultSubscriptions);
+            foreach (var expr in netExpr)
+            {
+                Assert.DoesNotThrow(() => expr(netConfig));
+            }
+            myLog = LogManager.CreateLogger(netConfig);
+            foreach (var expr in netExpr)
+            {
+                Assert.Throws<InvalidOperationException>(() => expr(fileConfig));
+            }
+            LogManager.DestroyLogger(myLog);
+
+            LogManager.Shutdown();
+        }
+
+        [Test]
         public void TypeSpecificPropertyModificationsValidated()
         {
+            LogManager.Start();
+
             var filePropertyChanges = new Action<LogConfiguration>[]
                                       {
                                           config => config.Directory = "somedir",
                                           config => config.RotationInterval = LogManager.DefaultRotationInterval,
-                                          config => config.FilenameTemplate = "{0}",
+                                          config => config.FilenameTemplate = "{0}"
                                       };
 
             var networkPropertyChanges = new Action<LogConfiguration>[]
                                          {
                                              config => config.Hostname = "foo",
-                                             config => config.Port = 5309,
+                                             config => config.Port = 5309
                                          };
 
             foreach (var value in Enum.GetValues(typeof(LogType)))
             {
                 var logType = (LogType)value;
-                if (logType == LogType.None) continue;
+                if (logType == LogType.None)
+                {
+                    continue;
+                }
 
                 var config = new LogConfiguration("foo", logType, LogManager.DefaultSubscriptions);
                 switch (logType)
@@ -287,21 +432,8 @@ namespace Microsoft.Diagnostics.Tracing.Logging.UnitTests
                     break;
                 }
             }
-        }
 
-        [Test]
-        public void NetworkPropertiesRequiredForValidConfiguration()
-        {
-            var config = new LogConfiguration("net", LogType.Network, LogManager.DefaultSubscriptions);
-            Assert.IsFalse(config.IsValid);
-            config.Hostname = "foo";
-            Assert.IsFalse(config.IsValid);
-
-            config = new LogConfiguration("net", LogType.Network, LogManager.DefaultSubscriptions);
-            config.Port = 5309;
-            Assert.IsFalse(config.IsValid);
-            config.Hostname = "foo";
-            Assert.IsTrue(config.IsValid);
+            LogManager.Shutdown();
         }
     }
 }

@@ -118,14 +118,13 @@ namespace Microsoft.Diagnostics.Tracing.Logging.UnitTests
             }
             catch (DirectoryNotFoundException) { }
 
-            string sessionName = Path.GetFileNameWithoutExtension(logFilename);
-            IEventLogger logger =
-                LogManager.CreateLogger<ETLFileLogger>(new LogConfiguration(sessionName, LogType.EventTracing)
-                                                       {
-                                                           Directory = "."
-                                                       });
+            var sName = Path.GetFileNameWithoutExtension(logFilename);
+            var subs = new[] {new EventProviderSubscription(TestLogger.Write.Guid, EventLevel.Verbose)};
+            var config = new LogConfiguration(sName, LogType.EventTracing, subs)
+                         {Directory = "."};
+            IEventLogger logger = LogManager.CreateLogger<ETLFileLogger>(config);
             logger.SubscribeToEvents(TestLogger.Write.Guid, EventLevel.Verbose);
-            this.sessionName = ETLFileLogger.SessionPrefix + sessionName;
+            this.sessionName = ETLFileLogger.SessionPrefix + sName;
             while (TraceEventSession.GetActiveSession(this.sessionName) == null)
             {
                 // Ensure session starts...
@@ -351,10 +350,16 @@ namespace Microsoft.Diagnostics.Tracing.Logging.UnitTests
                 }
                 if (logger == null)
                 {
-                    logger =
-                        LogManager.CreateLogger<ETLFileLogger>(new LogConfiguration(currentSessionName,
-                                                                                    LogType.EventTracing)
-                                                               {Directory = "."});
+                    var logConfig = new LogConfiguration(currentSessionName, LogType.EventTracing,
+                                                         new[]
+                                                         {
+                                                             new EventProviderSubscription(TestLogger.Write,
+                                                                                           EventLevel.Verbose),
+                                                         })
+                                    {
+                                        Directory = "."
+                                    };
+                    logger = LogManager.CreateLogger<ETLFileLogger>(logConfig);
                     logger.SubscribeToEvents(TestLogger.Write.Guid, EventLevel.Verbose);
                     while (TraceEventSession.GetActiveSession(ETLFileLogger.SessionPrefix + currentSessionName) == null)
                     {

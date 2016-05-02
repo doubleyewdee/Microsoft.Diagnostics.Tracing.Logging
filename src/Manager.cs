@@ -1,6 +1,6 @@
 ﻿// The MIT License (MIT)
 // 
-// Copyright (c) 2015 Microsoft
+// Copyright (c) 2015-2016 Microsoft
 // 
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -237,17 +237,114 @@ namespace Microsoft.Diagnostics.Tracing.Logging
         /// <summary>
         /// Minimum size of a file buffer.
         /// </summary>
-        public const int MinFileBufferSizeMB = 1;
+        public const int MinLogBufferSizeMB = 1;
 
         /// <summary>
         /// Maximum size of a file buffer.
         /// </summary>
-        public const int MaxFileBufferSizeMB = 128;
+        public const int MaxLogBufferSizeMB = 128;
 
         /// <summary>
         /// The default buffer size for log files.
         /// </summary>
-        public const int DefaultFileBufferSizeMB = 2;
+        public const int DefaultLogBufferSizeMB = 2;
+
+        /// <summary>The default filename template for rotated log files.</summary>
+        /// <remarks>
+        /// This yields a string like "foo_20110623T154000Z--T155000Z"
+        /// This bit of goop is intended to be ISO 8601 compliant and sorts very nicely.
+        /// </remarks>
+        public const string DefaultFilenameTemplate = "{0}_{1:yyyyMMdd}T{1:HHmmss}Z--T{2:HHmmss}Z";
+
+        /// <summary>The default filename template for rotated log files when using local timestamps.</summary>
+        /// <remarks>
+        /// This yields a string like "foo_20110623T154000-08--T155000-08". Note the zone offsets which help deal
+        /// with timezone changes. HOWEVER, this template assumes a timezone with ONLY hour-based offsets and this
+        /// code would not be suitable for use in areas where timezone offsets cross over into minutes (e.g. Tibet,
+        /// India, etc).
+        /// </remarks>
+        public const string DefaultLocalTimeFilenameTemplate = "{0}_{1:yyyyMMdd}T{1:HHmmsszz}--T{2:HHmmsszz}";
+
+        internal const string DataDirectoryEnvironmentVariable = "DATADIR";
+
+        /// <summary>
+        /// Minimum seconds between rotations (used to prevent over-aggressive requests to the public rotator.)
+        /// </summary>
+        internal const int MinDemandRotationDelta = 5;
+
+        // The name of the console logger (used to distinguish it from other file targets by using invalid file chars.)
+        internal const string ConsoleLoggerName = ":console:";
+
+        // 64kB memory streams for memory loggers. This number is totally arbitrary.
+        public const int InitialMemoryStreamSize = 64 * 1024;
+
+        /// <summary>
+        /// Current configuration for the log manager.
+        /// </summary>
+        public static readonly Configuration Configuration = new Configuration();
+
+        /// <summary>
+        /// Default subscriptioms for console and loggers created via the legacy (obsoleted) methods.
+        /// </summary>
+        public static readonly EventProviderSubscription[] DefaultSubscriptions =
+        {
+            new EventProviderSubscription(InternalLogger.Write, EventLevel.Critical)
+        };
+
+        /// <summary>
+        /// Singleton entry to insure only one manager exists at any given time.
+        /// </summary>
+        internal static LogManager singleton;
+
+        internal static int ProcessID = Process.GetCurrentProcess().Id;
+
+        internal readonly Dictionary<string, FileBackedLogger> fileLoggers =
+            new Dictionary<string, FileBackedLogger>(StringComparer.OrdinalIgnoreCase);
+
+        private readonly object loggersLock = new object();
+
+        internal readonly Dictionary<string, NetworkLogger> networkLoggers =
+            new Dictionary<string, NetworkLogger>(StringComparer.OrdinalIgnoreCase);
+
+        private ConsoleLogger consoleLogger;
+
+        private int defaultRotationInterval = 600; // 10m
+        private DateTime lastRotation = DateTime.MinValue;
+        private Timer rotationTimer;
+
+        private LogManager()
+        {
+            // Add any currently known EventSources to our catalog.
+            foreach (var src in EventSource.GetSources())
+            {
+                this.OnEventSourceCreated(src);
+            }
+
+            this.CreateConsoleLogger(new LogConfiguration(null, LogType.Console, DefaultSubscriptions));
+            if (Configuration.AllowEtwLogging == Configuration.AllowEtwLoggingValues.None)
+            {
+                Configuration.AllowEtwLogging = IsCurrentProcessElevated()
+                                                    ? Configuration.AllowEtwLoggingValues.Enabled
+                                                    : Configuration.AllowEtwLoggingValues.Disabled;
+            }
+
+            // Determine default directory
+            const string DefaultRootPath = "logs";
+            string dataDir = Environment.GetEnvironmentVariable(DataDirectoryEnvironmentVariable);
+            if (dataDir != null && Path.IsPathRooted(dataDir))
+            {
+                DefaultDirectory = Path.Combine(dataDir, DefaultRootPath);
+            }
+            else
+            {
+                DefaultDirectory = Path.Combine(Path.GetFullPath("."), DefaultRootPath);
+            }
+
+            var now = DateTime.UtcNow;
+            this.rotationTimer = new Timer(this.RotateCallback, null,
+                                           ((MinRotationInterval - now.Second) * 1000) - now.Millisecond,
+                                           Timeout.Infinite);
+        }
 
         /// <summary>
         /// Where log files are written to by default.
@@ -271,27 +368,6 @@ namespace Microsoft.Diagnostics.Tracing.Logging
                 singleton.defaultRotationInterval = value;
             }
         }
-
-        /// <summary>The default filename template for rotated log files.</summary>
-        /// <remarks>
-        /// This yields a string like "foo_20110623T154000Z--T155000Z"
-        /// This bit of goop is intended to be ISO 8601 compliant and sorts very nicely.
-        /// </remarks>
-        public const string DefaultFilenameTemplate = "{0}_{1:yyyyMMdd}T{1:HHmmss}Z--T{2:HHmmss}Z";
-
-        /// <summary>The default filename template for rotated log files when using local timestamps.</summary>
-        /// <remarks>
-        /// This yields a string like "foo_20110623T154000-08--T155000-08". Note the zone offsets which help deal
-        /// with timezone changes. HOWEVER, this template assumes a timezone with ONLY hour-based offsets and this
-        /// code would not be suitable for use in areas where timezone offsets cross over into minutes (e.g. Tibet,
-        /// India, etc).
-        /// </remarks>
-        public const string DefaultLocalTimeFilenameTemplate = "{0}_{1:yyyyMMdd}T{1:HHmmsszz}--T{2:HHmmsszz}";
-
-        /// <summary>
-        /// Current configuration for the log manager.
-        /// </summary>
-        public static readonly Configuration Configuration = new Configuration();
 
         /// <summary>
         /// Retrieve the console log.
@@ -352,11 +428,11 @@ namespace Microsoft.Diagnostics.Tracing.Logging
             {
                 return singleton?.consoleLogger as T;
             }
-            else if (typeof(T) == typeof(NetworkLogger))
+            if (typeof(T) == typeof(NetworkLogger))
             {
                 return singleton.GetNamedNetworkLogger(name) as T;
             }
-            else if (typeof(T) == typeof(ETLFileLogger) || typeof(T) == typeof(TextFileLogger))
+            if (typeof(T) == typeof(ETLFileLogger) || typeof(T) == typeof(TextFileLogger))
             {
                 return singleton.GetNamedFileLogger(name)?.Logger as T;
             }
@@ -381,7 +457,8 @@ namespace Microsoft.Diagnostics.Tracing.Logging
                 return singleton.GetNamedNetworkLogger(name);
             case LogType.EventTracing:
                 var logger = singleton.GetNamedFileLogger(name);
-                if (Configuration.AllowEtwLogging != Configuration.AllowEtwLoggingValues.Disabled && !(logger?.Logger is ETLFileLogger))
+                if (Configuration.AllowEtwLogging != Configuration.AllowEtwLoggingValues.Disabled &&
+                    !(logger?.Logger is ETLFileLogger))
                 {
                     return null;
                 }
@@ -451,11 +528,11 @@ namespace Microsoft.Diagnostics.Tracing.Logging
             Justification = "Adding overloads for all permutations would needlessly complicate this code")]
         [Obsolete("Use CreateLogger method.")]
         public static IEventLogger CreateTextLogger(string name, string directory = null,
-                                                    int bufferSizeMB = DefaultFileBufferSizeMB, int rotation = -1,
+                                                    int bufferSizeMB = DefaultLogBufferSizeMB, int rotation = -1,
                                                     string filenameTemplate = DefaultFilenameTemplate,
                                                     bool fileTimestampLocal = false)
         {
-            var config = new LogConfiguration(name, LogType.Text)
+            var config = new LogConfiguration(name, LogType.Text, DefaultSubscriptions)
                          {
                              Directory = directory ?? DefaultDirectory,
                              BufferSizeMB = bufferSizeMB,
@@ -484,11 +561,11 @@ namespace Microsoft.Diagnostics.Tracing.Logging
             Justification = "Adding overloads for all permutations would needlessly complicate this code")]
         [Obsolete("Use CreateLogger method.")]
         public static IEventLogger CreateETWLogger(string name, string directory = null,
-                                                   int bufferSizeMB = DefaultFileBufferSizeMB, int rotation = -1,
+                                                   int bufferSizeMB = DefaultLogBufferSizeMB, int rotation = -1,
                                                    string filenameTemplate = DefaultFilenameTemplate,
                                                    bool fileTimestampLocal = false)
         {
-            var config = new LogConfiguration(name, LogType.EventTracing)
+            var config = new LogConfiguration(name, LogType.EventTracing, DefaultSubscriptions)
                          {
                              Directory = directory ?? DefaultDirectory,
                              BufferSizeMB = bufferSizeMB,
@@ -532,7 +609,7 @@ namespace Microsoft.Diagnostics.Tracing.Logging
         [Obsolete("Use CreateLogger method.")]
         public static NetworkLogger CreateNetworkLogger(string baseName, string hostname, int port)
         {
-            var configuration = new LogConfiguration(baseName, LogType.Network)
+            var configuration = new LogConfiguration(baseName, LogType.Network, DefaultSubscriptions)
                                 {
                                     Hostname = hostname,
                                     Port = (ushort)port
@@ -653,74 +730,8 @@ namespace Microsoft.Diagnostics.Tracing.Logging
         /// </summary>
         public static bool IsValidFileBufferSize(int bufferSizeMB)
         {
-            return bufferSizeMB >= MinFileBufferSizeMB && (bufferSizeMB <= MaxFileBufferSizeMB || bufferSizeMB % MaxFileBufferSizeMB == 0);
-        }
-
-        internal const string DataDirectoryEnvironmentVariable = "DATADIR";
-
-        /// <summary>
-        /// Minimum seconds between rotations (used to prevent over-aggressive requests to the public rotator.)
-        /// </summary>
-        internal const int MinDemandRotationDelta = 5;
-
-        /// <summary>
-        /// Singleton entry to insure only one manager exists at any given time.
-        /// </summary>
-        internal static LogManager singleton;
-
-        // The name of the console logger (used to distinguish it from other file targets by using invalid file chars.)
-        internal const string ConsoleLoggerName = ":console:";
-        private ConsoleLogger consoleLogger;
-
-        internal static int ProcessID = Process.GetCurrentProcess().Id;
-
-        // 64kB memory streams for memory loggers. This number is totally arbitrary.
-        public const int InitialMemoryStreamSize = 64 * 1024;
-
-        internal readonly Dictionary<string, FileBackedLogger> fileLoggers =
-            new Dictionary<string, FileBackedLogger>(StringComparer.OrdinalIgnoreCase);
-
-        internal readonly Dictionary<string, NetworkLogger> networkLoggers =
-            new Dictionary<string, NetworkLogger>(StringComparer.OrdinalIgnoreCase);
-
-        private readonly object loggersLock = new object();
-
-        private int defaultRotationInterval = 600; // 10m
-        private DateTime lastRotation = DateTime.MinValue;
-        private Timer rotationTimer;
-
-        private LogManager()
-        {
-            // Add any currently known EventSources to our catalog.
-            foreach (var src in EventSource.GetSources())
-            {
-                this.OnEventSourceCreated(src);
-            }
-
-            this.CreateConsoleLogger(new LogConfiguration(null, LogType.Console));
-            if (Configuration.AllowEtwLogging == Configuration.AllowEtwLoggingValues.None)
-            {
-                Configuration.AllowEtwLogging = IsCurrentProcessElevated()
-                                                    ? Configuration.AllowEtwLoggingValues.Enabled
-                                                    : Configuration.AllowEtwLoggingValues.Disabled;
-            }
-
-            // Determine default directory
-            const string DefaultRootPath = "logs";
-            string dataDir = Environment.GetEnvironmentVariable(DataDirectoryEnvironmentVariable);
-            if (dataDir != null && Path.IsPathRooted(dataDir))
-            {
-                DefaultDirectory = Path.Combine(dataDir, DefaultRootPath);
-            }
-            else
-            {
-                DefaultDirectory = Path.Combine(Path.GetFullPath("."), DefaultRootPath);
-            }
-
-            var now = DateTime.UtcNow;
-            this.rotationTimer = new Timer(this.RotateCallback, null,
-                                           ((MinRotationInterval - now.Second) * 1000) - now.Millisecond,
-                                           Timeout.Infinite);
+            return bufferSizeMB >= MinLogBufferSizeMB &&
+                   (bufferSizeMB <= MaxLogBufferSizeMB || bufferSizeMB % MaxLogBufferSizeMB == 0);
         }
 
         internal static bool IsCurrentProcessElevated()
@@ -801,9 +812,6 @@ namespace Microsoft.Diagnostics.Tracing.Logging
             this.consoleLogger?.Dispose();
 
             this.consoleLogger = new ConsoleLogger();
-            // We always want assert-level events from ourself to go to console, regardless of configuration.
-            configuration.AddSubscription(new EventProviderSubscription(InternalLogger.Write, EventLevel.Critical,
-                                                                        EventKeywords.None));
             configuration.Logger = this.consoleLogger;
         }
 
