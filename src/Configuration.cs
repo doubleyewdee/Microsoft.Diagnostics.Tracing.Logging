@@ -24,503 +24,418 @@ namespace Microsoft.Diagnostics.Tracing.Logging
 {
     using System;
     using System.Collections.Generic;
-    using System.Diagnostics.CodeAnalysis;
     using System.Diagnostics.Tracing;
     using System.Globalization;
     using System.IO;
-    using System.Threading;
+    using System.Linq;
     using System.Xml;
 
-    public sealed partial class LogManager
+    using Newtonsoft.Json;
+    using Newtonsoft.Json.Linq;
+
+    public sealed class InvalidConfigurationException : Exception
+    {
+        public InvalidConfigurationException() { }
+
+        public InvalidConfigurationException(string message) : base(message) { }
+
+        public InvalidConfigurationException(string message, Exception innerException)
+            : base(message, innerException) { }
+    }
+
+    /// <summary>
+    /// Represents configuration of a set of log destinations along with global options.
+    /// </summary>
+    /// <remarks>
+    /// Once constructed Configuration objects are considered to be immutable. Logs may not be added or removed,
+    /// however the <see cref="AllowEtwLogging"/> value may be changed.
+    /// </remarks>
+    [JsonObject(MemberSerialization = MemberSerialization.OptIn), JsonConverter(typeof(Converter))]
+    public sealed class Configuration
     {
         /// <summary>
-        /// Provide string-based configuration which will be applied additively after any file configuration.
+        /// Possible values for <see cref="Configuration.AllowEtwLogging"/>
         /// </summary>
-        /// <remarks>
-        /// Any change will force a full configuration reload. This function is not thread-safe with regards to
-        /// concurrent callers.
-        /// </remarks>
-        /// <param name="configurationXml">A string containing the XML configuration</param>
-        /// <returns>True if the configuration was successfully applied</returns>
-        public static bool SetConfiguration(string configurationXml)
+        public enum AllowEtwLoggingValues
         {
-            if (!IsConfigurationValid(configurationXml))
+            /// <summary>
+            /// Allow the log manager to decide what to do.
+            /// </summary>
+            None = 0,
+
+            /// <summary>
+            /// Write text logs instead of ETW when files are configured for ETW.
+            /// </summary>
+            Disabled,
+
+            /// <summary>
+            /// Write ETW when files are configured to do so. If kernel mode ETW is not available the logger will fail
+            /// to initialize.
+            /// </summary>
+            Enabled
+        }
+
+        private readonly HashSet<LogConfiguration> logs;
+
+        /// <summary>
+        /// Construct a new Configuration object.
+        /// </summary>
+        /// <param name="logs">Enumeration of one or more LogConfiguration objects.</param>
+        /// <param name="allowLogging">Specification for enabling/disabling ETW logging.</param>
+        public Configuration(IEnumerable<LogConfiguration> logs, AllowEtwLoggingValues allowLogging)
+        {
+            if (!Enum.IsDefined(typeof(AllowEtwLoggingValues), allowLogging))
             {
-                return false;
+                throw new ArgumentOutOfRangeException(nameof(allowLogging), "Invalid value for allowing ETW logging.");
             }
 
-            singleton.configurationData = configurationXml;
-            return singleton.ApplyConfiguration();
+            if (logs == null)
+            {
+                throw new ArgumentNullException(nameof(logs));
+            }
+
+            this.AllowEtwLogging = allowLogging;
+            this.logs = new HashSet<LogConfiguration>();
+            foreach (var log in logs)
+            {
+                log.Validate();
+                if (log.Type == LogType.MemoryBuffer)
+                {
+                    // TODO: enable named memory logs in LogManager.
+                    throw new InvalidConfigurationException("Memory logs are not currently supported.");
+                }
+                if (!this.logs.Add(log))
+                {
+                    throw new InvalidConfigurationException($"Duplicate log {log.Name}, {log.Type} not allowed.");
+                }
+            }
+            if (this.logs.Count == 0)
+            {
+                throw new ArgumentException("No log configurations provided.", nameof(logs));
+            }
+
+            this.ApplyEtwLoggingSettings();
         }
 
         /// <summary>
-        /// Check if a configuration string is valid
+        /// Construct a new Configuration object.
         /// </summary>
-        /// <param name="configurationXml">A string containing the XML configuration</param>
-        /// <returns>true if the configuration is valid, false otherwise</returns>
-        public static bool IsConfigurationValid(string configurationXml)
+        /// <param name="logs">Enumeration of one or more LogConfiguration objects.</param>
+        public Configuration(IEnumerable<LogConfiguration> logs) : this(logs, AllowEtwLoggingValues.None) { }
+
+        /// <summary>
+        /// Construct an empty Configuration object (useful to maintain a single global Configuration state).
+        /// </summary>
+        internal Configuration()
         {
-            var unused = new Dictionary<string, LogConfiguration>(StringComparer.OrdinalIgnoreCase);
-            return ParseConfiguration(configurationXml, unused);
+            this.AllowEtwLogging = AllowEtwLoggingValues.None;
+            this.logs = new HashSet<LogConfiguration>();
         }
 
         /// <summary>
-        /// Assign a file to read configuration from
+        /// Whether or not to allow ETW logging.
         /// </summary>
-        /// <param name="filename">The file to read configuration from (or null to remove use of the file)</param>
-        /// <returns>true if the file was valid, false otherwise</returns>
-        public static bool SetConfigurationFile(string filename)
+        /// <remarks>
+        /// The priority of values is: disabled OR enabled &gt; none. When configurations are combined internally the
+        /// most recent value will be used.
+        /// 
+        /// Why do this? Many users in a "single box" scenario aren't ready to deal with the overhead of ETW. ETW creates
+        /// files locked to the kernel which, when a process is improperly terminated, just stay open. For many folks not
+        /// interested in logging the behavior is incredibly disruptive to their iterative development process and, really,
+        /// all they want is to notepad.exe some test logs without extra pain involved in dealing with a binary format.
+        /// Additionally, for tests which fail and terminate early it's easier to deal with failures that do not happen
+        /// to leave dangling logging sessions.
+        /// </remarks>
+        public AllowEtwLoggingValues AllowEtwLogging { get; set; }
+
+        /// <summary>
+        /// Enumeration of configured logs.
+        /// </summary>
+        public IEnumerable<LogConfiguration> Logs => this.logs;
+
+        internal void Merge(Configuration other)
         {
-            return singleton.UpdateConfigurationFile(filename);
+            if (other == null)
+            {
+                return;
+            }
+
+            if (other.AllowEtwLogging != AllowEtwLoggingValues.None)
+            {
+                this.AllowEtwLogging = other.AllowEtwLogging;
+            }
+
+            foreach (var otherLog in other.logs)
+            {
+                var log = this.logs.FirstOrDefault(l => l.Equals(otherLog));
+                if (log != null)
+                {
+                    this.logs.Remove(log);
+                    otherLog.Merge(log);
+                }
+                this.logs.Add(otherLog);
+            }
+
+            this.ApplyEtwLoggingSettings();
         }
 
-        // HEY! HEY YOU! Are you adding stuff here? You're adding stuff, it's cool. Just go update
-        // the 'configuration.md' file in doc with what you've added. Santa will bring you bonus gifts.
-        private const string EtwOverrideXpath = "/loggers/etwlogging";
-        private const string EtwOverrideEnabledAttribute = "enabled";
-        private const string LogTagXpath = "/loggers/log";
-        private const string LogBufferSizeAttribute = "buffersizemb";
-        private const string LogDirectoryAttribute = "directory";
-        private const string LogFilenameTemplateAttribute = "filenametemplate";
-        private const string LogTimestampLocal = "timestamplocal";
-        private const string LogFilterTag = "filter";
-        private const string LogNameAttribute = "name";
-        private const string LogRotationAttribute = "rotationinterval";
-        private const string LogTypeAttribute = "type";
-        private const string LogHostnameAttribute = "hostname";
-        private const string LogPortAttribute = "port";
-        private const string LogMaximumSizeAttributeMB = "maximumsizemb";
-        private const string LogMaximumAgeAttribute = "maximumage";
-        private const string SourceTag = "source";
-        private const string SourceKeywordsAttribute = "keywords";
-        private const string SourceMinSeverityAttribute = "minimumseverity";
-        private const string SourceProviderIDAttribute = "providerid";
-        private const string SourceProviderNameAttribute = "name";
-        private string configurationFile;
-        private long configurationFileLastWrite;
-        private FileSystemWatcher configurationFileWatcher;
-        internal int configurationFileReloadCount; // primarily a test hook.
-        private string configurationFileData;
-        private string configurationData;
-        private Dictionary<string, LogConfiguration> logConfigurations;
+        public override string ToString()
+        {
+            var serializer = new JsonSerializer();
+            using (var writer = new StringWriter())
+            {
+                serializer.Serialize(writer, this);
+                return writer.ToString();
+            }
+        }
 
-        private static bool ParseConfiguration(string configurationXml, Dictionary<string, LogConfiguration> loggers)
+        /// <summary>
+        /// Clear all existing logs (useful during reloads / shutdown scenarios)
+        /// </summary>
+        internal void Clear()
+        {
+            this.logs.Clear();
+        }
+
+        private void ApplyEtwLoggingSettings()
+        {
+            if (this.AllowEtwLogging == AllowEtwLoggingValues.Disabled)
+            {
+                foreach (var log in this.logs)
+                {
+                    if (log.Type == LogType.EventTracing)
+                    {
+                        log.Type = LogType.Text;
+                    }
+                }
+            }
+        }
+
+        internal static bool ParseConfiguration(string configurationString, out Configuration configuration)
         {
             bool clean = true; // used to track whether any errors were encountered
+            configuration = null;
 
-            if (string.IsNullOrEmpty(configurationXml))
+            if (string.IsNullOrEmpty(configurationString))
             {
                 return true; // it's okay to have nothing at all
             }
 
-            var configuration = new XmlDocument();
+            configurationString = configurationString.Trim();
+
             try
             {
-                configuration.LoadXml(configurationXml);
+                var xDocument = new XmlDocument();
+                xDocument.LoadXml(configurationString);
+                clean = ParseXmlConfiguration(xDocument, out configuration);
             }
             catch (XmlException)
             {
-                InternalLogger.Write.InvalidConfiguration("Configuration was not valid XML");
+                InternalLogger.Write.InvalidConfiguration("Configuration was not valid XML.");
                 return false;
             }
+            catch (InvalidConfigurationException e)
+            {
+                InternalLogger.Write.InvalidConfiguration(e.Message);
+                configuration = null;
+                clean = false;
+            }
 
-            XmlNode node = configuration.SelectSingleNode(EtwOverrideXpath);
+            return clean;
+        }
+
+        private sealed class Converter : JsonConverter
+        {
+            private const string AllowEtwLoggingProperty = "allowEtwLogging";
+            private const string LogsProperty = "logs";
+
+            public override void WriteJson(JsonWriter writer, object value, JsonSerializer serializer)
+            {
+                var configuration = value as Configuration;
+                if (configuration == null)
+                {
+                    throw new ArgumentNullException(nameof(value));
+                }
+
+                writer.WriteStartObject();
+                if (configuration.AllowEtwLogging != AllowEtwLoggingValues.None)
+                {
+                    writer.WritePropertyName(AllowEtwLoggingProperty);
+                    writer.WriteValue(configuration.AllowEtwLogging == AllowEtwLoggingValues.Enabled);
+                }
+                writer.WritePropertyName(LogsProperty);
+                serializer.Serialize(writer, configuration.Logs);
+                writer.WriteEndObject();
+            }
+
+            public override object ReadJson(JsonReader reader, Type objectType, object existingValue,
+                                            JsonSerializer serializer)
+            {
+                var jObject = JObject.Load(reader);
+                JToken token;
+                var allowEtwLogging = AllowEtwLoggingValues.None;
+                if (jObject.TryGetValue(AllowEtwLoggingProperty, StringComparison.OrdinalIgnoreCase, out token))
+                {
+                    allowEtwLogging = token.Value<bool>()
+                                          ? AllowEtwLoggingValues.Enabled
+                                          : AllowEtwLoggingValues.Disabled;
+                }
+                var logsArray = jObject.GetValue(LogsProperty, StringComparison.OrdinalIgnoreCase);
+                var logs = serializer.Deserialize<List<LogConfiguration>>(logsArray.CreateReader());
+
+                return new Configuration(logs, allowEtwLogging);
+            }
+
+            public override bool CanConvert(Type objectType)
+            {
+                return objectType == typeof(EventProviderSubscription);
+            }
+        }
+
+        #region XML configuration parsing
+        private static bool ParseXmlConfiguration(XmlDocument xDocument, out Configuration configuration)
+        {
+            var clean = true;
+            var allowEtwLogging = AllowEtwLoggingValues.None;
+            var logs = new HashSet<LogConfiguration>();
+
+            XmlNode node = xDocument.SelectSingleNode(EtwOverrideXpath);
             if (node != null)
             {
                 XmlNode setting = node.Attributes.GetNamedItem(EtwOverrideEnabledAttribute);
-                bool isEnabled = (AllowEtwLogging == AllowEtwLoggingValues.Enabled);
+                bool isEnabled;
                 if (setting == null || !bool.TryParse(setting.Value, out isEnabled))
                 {
                     InternalLogger.Write.InvalidConfiguration(EtwOverrideXpath + " tag has invalid " +
                                                               EtwOverrideEnabledAttribute + " attribute");
                     clean = false;
                 }
-
-                AllowEtwLogging = isEnabled ? AllowEtwLoggingValues.Enabled : AllowEtwLoggingValues.Disabled;
+                else
+                {
+                    allowEtwLogging = isEnabled ? AllowEtwLoggingValues.Enabled : AllowEtwLoggingValues.Disabled;
+                }
             }
 
-            foreach (XmlNode log in configuration.SelectNodes(LogTagXpath))
+            foreach (XmlNode log in xDocument.SelectNodes(LogTagXpath))
             {
-                string name = GetLogNameFromNode(log);
-                LoggerType type = GetLogTypeFromNode(log);
-
-                if (type == LoggerType.None)
+                string name = null;
+                LogType type;
+                if (log.Attributes[LogNameAttribute] != null)
                 {
-                    // GetLogTypeFromNode logs this particular error.
+                    name = log.Attributes[LogNameAttribute].Value.Trim();
+                }
+
+                // If no type is provided we currently default to text.
+                if (log.Attributes[LogTypeAttribute] == null)
+                {
+                    type = LogType.Text;
+                }
+                else
+                {
+                    type = log.Attributes[LogTypeAttribute].Value.ToLogType();
+                }
+
+                if (type == LogType.None)
+                {
+                    InternalLogger.Write.InvalidConfiguration("invalid log type " +
+                                                              log.Attributes[LogTypeAttribute].Value);
                     clean = false;
                     continue;
                 }
 
-                if (type == LoggerType.Console)
+                if (type == LogType.Console)
                 {
                     if (name != null)
                     {
                         InternalLogger.Write.InvalidConfiguration("console log should not have a name");
                         clean = false;
                     }
-
-                    // We use a special name for the console logger that is invalid for file loggers so we can track
-                    // it along with them.
-                    name = ConsoleLoggerName;
                 }
-                else
+
+                // If a log is listed in duplicates we will discard the previous data entirely. This is a change from historic
+                // (pre OSS-release) behavior which was... quasi-intentional shall we say. The author is unaware of anybody
+                // using this capability and, since it confusing at best, would like for it to go away.
+                try
                 {
-                    if (string.IsNullOrEmpty(name))
+                    List<EventProviderSubscription> subscriptions;
+                    List<string> filters;
+
+                    clean &= ParseLogSources(log, out subscriptions);
+                    ParseLogFilters(log, out filters);
+                    var config = new LogConfiguration(name, type, subscriptions, filters);
+
+                    clean &= ParseLogNode(log, config);
+
+                    config.Validate();
+                    if (!logs.Add(config))
                     {
-                        InternalLogger.Write.InvalidConfiguration("cannot configure a log with no name");
+                        InternalLogger.Write.InvalidConfiguration($"duplicate log {log.Name} discarded.");
                         clean = false;
-                        continue;
-                    }
-                    if (name.IndexOfAny(Path.GetInvalidFileNameChars()) != -1)
-                    {
-                        InternalLogger.Write.InvalidConfiguration("base name of log is invalid " + name);
-                        clean = false;
-                        continue;
-                    }
-
-                    if (type == LoggerType.ETLFile && AllowEtwLogging == AllowEtwLoggingValues.Disabled)
-                    {
-                        InternalLogger.Write.OverridingEtwLogging(name);
-                        type = LoggerType.TextLogFile;
                     }
                 }
-
-                // We wish to update existing configuration where possible.
-                LogConfiguration config;
-                if (!loggers.TryGetValue(name, out config))
+                catch (InvalidConfigurationException e)
                 {
-                    config = new LogConfiguration();
-                }
-
-                config.FileType = type;
-                clean &= ParseLogNode(log, config);
-
-                if (config.NamedSources.Count + config.GuidSources.Count == 0)
-                {
-                    InternalLogger.Write.InvalidConfiguration("log destination " + name + " has no valid sources");
+                    InternalLogger.Write.InvalidConfiguration(e.Message);
                     clean = false;
-                    continue;
                 }
-
-                // Ensure what we got has been sanitized. We currently don't do stringent checks on the console logger
-                // to see if useless stuff like a rotation interval or buffer size is set, but could in the future get
-                // more picky.
-                if (config.Filters.Count > 0 && !config.HasFeature(LogConfiguration.Features.RegexFilter))
-                {
-                    InternalLogger.Write.InvalidConfiguration("log destination " + name + " has filters but type " +
-                                                              type + " does not support this feature.");
-                    clean = false;
-                    config.Filters.Clear();
-                }
-
-                if (config.RotationInterval != 0)
-                {
-                    
-                }
-
-                if (config.MaximumAge > TimeSpan.Zero || config.MaximumSizeMB > 0)
-                {
-                    var rotationEnabled = true;
-                    if (!config.HasFeature(LogConfiguration.Features.FileBacked))
-                    {
-                        InternalLogger.Write.InvalidConfiguration($"log destination {name} has a maximum age or size defined but is not file-backed");
-                        rotationEnabled = false;
-                    }
-                    else if (config.RotationInterval == 0)
-                    {
-                        InternalLogger.Write.InvalidConfiguration($"log destination {name} does not rotate files, maximum age/size cannot be applied.");
-                        rotationEnabled = false;
-                    }
-                    else if (FileBackedLogger.IsFilenameTemplateValidForRetention(config.FilenameTemplate))
-                    {
-                        InternalLogger.Write.InvalidConfiguration($"log destination {name} has a template that is not compatible with retention.");
-                        rotationEnabled = false;
-                    }
-
-                    if (!rotationEnabled)
-                    {
-                        clean = false;
-                        config.MaximumAge = TimeSpan.Zero;
-                        config.MaximumSizeMB = 0;
-                    }
-                }
-
-                loggers[name] = config;
             }
 
+            configuration = logs.Count > 0 ? new Configuration(logs, allowEtwLogging) : null;
             return clean;
-        }
-
-        private bool ApplyConfiguration()
-        {
-            var newConfig = new Dictionary<string, LogConfiguration>(StringComparer.OrdinalIgnoreCase);
-            if (!ParseConfiguration(this.configurationFileData, newConfig)
-                || !ParseConfiguration(this.configurationData, newConfig))
-            {
-                return false;
-            }
-
-            lock (this.loggersLock)
-            {
-                foreach (var logger in this.fileLoggers.Values)
-                {
-                    logger.Dispose();
-                }
-                foreach (var logger in this.networkLoggers.Values)
-                {
-                    logger.Dispose();
-                }
-                this.fileLoggers.Clear();
-                this.networkLoggers.Clear();
-                this.logConfigurations = newConfig;
-
-                foreach (var kvp in this.logConfigurations)
-                {
-                    string loggerName = kvp.Key;
-                    LogConfiguration loggerConfig = kvp.Value;
-                    IEventLogger logger;
-                    if (loggerConfig.FileType == LoggerType.Console)
-                    {
-                        // We re-create the console logger to clear its config (since we don't have a better way
-                        // to do that right now).
-                        this.CreateConsoleLogger();
-                        logger = this.consoleLogger;
-                    }
-                    else if (loggerConfig.FileType == LoggerType.Network)
-                    {
-                        logger = this.CreateNetLogger(loggerName, loggerConfig.Hostname, loggerConfig.Port);
-                    }
-                    else
-                    {
-                        logger = this.CreateFileLogger(loggerConfig.FileType, loggerName, loggerConfig.Directory,
-                                                       loggerConfig.BufferSize, loggerConfig.RotationInterval,
-                                                       loggerConfig.FilenameTemplate,
-                                                       loggerConfig.TimestampLocal,
-                                                       loggerConfig.MaximumAge, loggerConfig.MaximumSizeMB);
-                    }
-
-                    foreach (var f in loggerConfig.Filters)
-                    {
-                        logger.AddRegexFilter(f);
-                    }
-
-                    // Build a collection of all desired subscriptions so that we can subscribe in bulk at the end.
-                    // We do this because ordering may matter to specific types of loggers and they are best suited to
-                    // manage that internally.
-                    var subscriptions = new List<EventProviderSubscription>();
-                    foreach (var ns in loggerConfig.NamedSources)
-                    {
-                        EventSourceInfo sourceInfo;
-                        string name = ns.Key;
-                        LogSourceLevels levels = ns.Value;
-                        if ((sourceInfo = GetEventSourceInfo(name)) != null)
-                        {
-                            subscriptions.Add(new EventProviderSubscription(sourceInfo.Source)
-                                              {
-                                                  MinimumLevel = levels.Level,
-                                                  Keywords = levels.Keywords
-                                              });
-                        }
-                    }
-
-                    foreach (var gs in loggerConfig.GuidSources)
-                    {
-                        EventSourceInfo sourceInfo;
-                        Guid guid = gs.Key;
-                        LogSourceLevels levels = gs.Value;
-                        if (loggerConfig.HasFeature(LogConfiguration.Features.GuidSubscription))
-                        {
-                            subscriptions.Add(new EventProviderSubscription(guid)
-                                              {
-                                                  MinimumLevel = levels.Level,
-                                                  Keywords = levels.Keywords
-                                              });
-                        }
-                        else if (loggerConfig.HasFeature(LogConfiguration.Features.EventSourceSubscription) &&
-                                 (sourceInfo = GetEventSourceInfo(guid)) != null)
-                        {
-                            subscriptions.Add(new EventProviderSubscription(sourceInfo.Source)
-                                              {
-                                                  MinimumLevel = levels.Level,
-                                                  Keywords = levels.Keywords
-                                              });
-                        }
-                    }
-
-                    logger.SubscribeToEvents(subscriptions);
-                }
-            }
-
-            return true;
-        }
-
-        private static void ApplyConfigForEventSource(LogConfiguration config, IEventLogger logger, EventSource source,
-                                                      LogSourceLevels levels)
-        {
-            if (config.HasFeature(LogConfiguration.Features.EventSourceSubscription))
-            {
-                logger.SubscribeToEvents(source, levels.Level, levels.Keywords);
-            }
-            else if (config.HasFeature(LogConfiguration.Features.GuidSubscription))
-            {
-                logger.SubscribeToEvents(source.Guid, levels.Level, levels.Keywords);
-            }
-        }
-
-        private static string GetLogNameFromNode(XmlNode xmlNode)
-        {
-            if (xmlNode.Attributes[LogNameAttribute] != null)
-            {
-                return xmlNode.Attributes[LogNameAttribute].Value.Trim();
-            }
-
-            return null;
-        }
-
-        private static LoggerType GetLogTypeFromNode(XmlNode xmlNode)
-        {
-            // If no type is provided we currently default to text.
-            if (xmlNode.Attributes[LogTypeAttribute] == null)
-            {
-                return LoggerType.TextLogFile;
-            }
-
-            switch (xmlNode.Attributes[LogTypeAttribute].Value.ToLower(CultureInfo.InvariantCulture))
-            {
-            case "con":
-            case "cons":
-            case "console":
-                return LoggerType.Console;
-            case "text":
-            case "txt":
-                return LoggerType.TextLogFile;
-            case "etw":
-            case "etl":
-                return LoggerType.ETLFile;
-            case "net":
-            case "network":
-                return LoggerType.Network;
-            default:
-                InternalLogger.Write.InvalidConfiguration("invalid log type " +
-                                                          xmlNode.Attributes[LogTypeAttribute].Value);
-                return LoggerType.None;
-            }
         }
 
         private static bool ParseLogNode(XmlNode xmlNode, LogConfiguration config)
         {
-            bool clean = true;
+            var clean = true;
             foreach (XmlAttribute logAttribute in xmlNode.Attributes)
             {
-                switch (logAttribute.Name.ToLower(CultureInfo.InvariantCulture))
+                try
                 {
-                case LogBufferSizeAttribute:
-                    if (!int.TryParse(logAttribute.Value, out config.BufferSize)
-                        || !IsValidFileBufferSize(config.BufferSize))
+                    switch (logAttribute.Name.ToLower(CultureInfo.InvariantCulture))
                     {
-                        InternalLogger.Write.InvalidConfiguration("invalid buffer size " + logAttribute.Value);
-                        config.BufferSize = DefaultFileBufferSizeMB;
-                        clean = false;
-                    }
-                    break;
-                case LogDirectoryAttribute:
-                    if (!IsValidDirectory(logAttribute.Value))
-                    {
-                        InternalLogger.Write.InvalidConfiguration("invalid directory name " + logAttribute.Value);
-                        clean = false;
-                    }
-                    else
-                    {
+                    case LogBufferSizeAttribute:
+                        config.BufferSizeMB = int.Parse(logAttribute.Value);
+                        break;
+                    case LogDirectoryAttribute:
                         config.Directory = logAttribute.Value;
-                    }
-                    break;
-                case LogFilenameTemplateAttribute:
-                    if (!FileBackedLogger.IsValidFilenameTemplate(logAttribute.Value, TimeSpan.Zero))
-                    {
-                        InternalLogger.Write.InvalidConfiguration("invalid filename template " + logAttribute.Value);
-                        clean = false;
-                    }
-                    else
-                    {
+                        break;
+                    case LogFilenameTemplateAttribute:
                         config.FilenameTemplate = logAttribute.Value;
-                    }
-                    break;
-                case LogTimestampLocal:
-                    if (!bool.TryParse(logAttribute.Value, out config.TimestampLocal))
-                    {
-                        InternalLogger.Write.InvalidConfiguration("invalid timestamplocal value " + logAttribute.Value);
-                        config.TimestampLocal = false;
-                        clean = false;
-                    }
-                    break;
-                case LogRotationAttribute:
-                    if (!int.TryParse(logAttribute.Value, out config.RotationInterval)
-                        || !IsValidRotationInterval(config.RotationInterval))
-                    {
-                        InternalLogger.Write.InvalidConfiguration("invalid rotation interval " + logAttribute.Value);
-                        config.RotationInterval = DefaultRotationInterval;
-                        clean = false;
-                    }
-                    break;
-                case LogHostnameAttribute:
-                    if (Uri.CheckHostName(logAttribute.Value) == UriHostNameType.Unknown)
-                    {
-                        InternalLogger.Write.InvalidConfiguration("invalid hostname name " + logAttribute.Value);
-                        clean = false;
-                    }
-                    else
-                    {
+                        break;
+                    case LogTimestampLocal:
+                        config.TimestampLocal = bool.Parse(logAttribute.Value);
+                        break;
+                    case LogRotationAttribute:
+                        config.RotationInterval = int.Parse(logAttribute.Value);
+                        break;
+                    case LogHostnameAttribute:
                         config.Hostname = logAttribute.Value;
+                        break;
+                    case LogPortAttribute:
+                        config.Port = ushort.Parse(logAttribute.Value);
+                        break;
                     }
-                    break;
-                case LogPortAttribute:
-                    if (!int.TryParse(logAttribute.Value, out config.Port)
-                        || config.Port <= 0)
-                    {
-                        InternalLogger.Write.InvalidConfiguration("invalid port " + logAttribute.Value);
-                        config.Port = 80;
-                        clean = false;
-                    }
-                    break;
-                case LogMaximumAgeAttribute:
-                    if (!TimeSpan.TryParse(logAttribute.Value, out config.MaximumAge)
-                        || config.MaximumAge < TimeSpan.Zero
-                        || config.MaximumAge < TimeSpan.FromSeconds(config.RotationInterval)
-                        || config.MaximumAge.Ticks % TimeSpan.TicksPerSecond != 0)
-                    {
-                        InternalLogger.Write.InvalidConfiguration("Invalid maximumAge " + logAttribute.Value);
-                        config.MaximumAge = TimeSpan.Zero;
-                        clean = false;
-                    }
-                    break;
-                case LogMaximumSizeAttributeMB:
-                    if (!long.TryParse(logAttribute.Value, out config.MaximumSizeMB)
-                        || config.MaximumSizeMB < 0)
-                    {
-                        
-                        InternalLogger.Write.InvalidConfiguration("Invalid maximumSizeMB " + logAttribute.Value);
-                        config.MaximumSizeMB = 0;
-                        clean = false;
-                    }
-                    break;
+                }
+                catch (Exception e) when (e is FormatException || e is OverflowException)
+                {
+                    InternalLogger.Write.InvalidConfiguration($"Attribute {logAttribute.Name} has invalid value {logAttribute.Value} ({e.GetType()}: {e.Message})");
+                    clean = false;
                 }
             }
 
-            clean &= ParseLogSources(xmlNode, config);
-            clean &= ParseLogFilters(xmlNode, config);
             return clean;
         }
 
-        private static bool ParseLogSources(XmlNode xmlNode, LogConfiguration config)
+        private static bool ParseLogSources(XmlNode xmlNode, out List<EventProviderSubscription> subscriptions)
         {
-            bool clean = true;
-
+            var clean = true;
+            subscriptions = new List<EventProviderSubscription>();
             foreach (XmlNode source in xmlNode.SelectNodes(SourceTag))
             {
                 string sourceName = null;
                 Guid sourceProvider = Guid.Empty;
-                var sourceLevel = EventLevel.Informational;
-                var sourceKeywords = (long)EventKeywords.None;
+                var level = EventLevel.Informational;
+                var keywords = (long)EventKeywords.None;
                 foreach (XmlAttribute sourceAttribute in source.Attributes)
                 {
                     switch (sourceAttribute.Name.ToLower(CultureInfo.InvariantCulture))
@@ -535,14 +450,14 @@ namespace Microsoft.Diagnostics.Tracing.Logging
                         }
 
                         if (!long.TryParse(value, NumberStyles.HexNumber, CultureInfo.InvariantCulture,
-                                           out sourceKeywords))
+                                           out keywords))
                         {
                             InternalLogger.Write.InvalidConfiguration("invalid keywords value " + sourceAttribute.Value);
                             clean = false;
                         }
                         break;
                     case SourceMinSeverityAttribute:
-                        if (!Enum.TryParse(sourceAttribute.Value, true, out sourceLevel))
+                        if (!Enum.TryParse(sourceAttribute.Value, true, out level))
                         {
                             InternalLogger.Write.InvalidConfiguration("invalid severity value " + sourceAttribute.Value);
                             clean = false;
@@ -561,14 +476,13 @@ namespace Microsoft.Diagnostics.Tracing.Logging
                     }
                 }
 
-                var levels = new LogSourceLevels(sourceLevel, (EventKeywords)sourceKeywords);
                 if (sourceProvider != Guid.Empty)
                 {
-                    config.GuidSources[sourceProvider] = levels;
+                    subscriptions.Add(new EventProviderSubscription(sourceProvider, level, (EventKeywords)keywords));
                 }
                 else if (!string.IsNullOrEmpty(sourceName))
                 {
-                    config.NamedSources[sourceName] = levels;
+                    subscriptions.Add(new EventProviderSubscription(sourceName, level, (EventKeywords)keywords));
                 }
                 else
                 {
@@ -580,190 +494,35 @@ namespace Microsoft.Diagnostics.Tracing.Logging
             return clean;
         }
 
-        private static bool ParseLogFilters(XmlNode xmlNode, LogConfiguration config)
+        private static void ParseLogFilters(XmlNode xmlNode, out List<string> regexFilters)
         {
-            bool clean = true;
-
-            foreach (XmlNode source in xmlNode.SelectNodes(LogFilterTag))
+            regexFilters = new List<string>();
+            foreach (XmlNode filter in xmlNode.SelectNodes(LogFilterTag))
             {
-                string filterValue = source.InnerText.Trim();
-                if (string.IsNullOrEmpty(filterValue))
-                {
-                    InternalLogger.Write.InvalidConfiguration("empty/invalid filter value");
-                    clean = false;
-                    continue;
-                }
-
-                if (config.Filters.Contains(filterValue))
-                {
-                    InternalLogger.Write.InvalidConfiguration("duplicate filter value " + filterValue);
-                    clean = false;
-                    continue;
-                }
-
-                config.Filters.Add(filterValue);
-            }
-
-            return clean;
-        }
-
-        [SuppressMessage("Microsoft.Security", "CA2122:DoNotIndirectlyExposeMethodsWithLinkDemands")]
-        private bool UpdateConfigurationFile(string filename)
-        {
-            if (filename != null && !File.Exists(filename))
-            {
-                throw new FileNotFoundException("configuration file does not exist", filename);
-            }
-
-            if (this.configurationFileWatcher != null)
-            {
-                this.configurationFileWatcher.Dispose();
-                this.configurationFileWatcher = null;
-            }
-
-            InternalLogger.Write.SetConfigurationFile(filename);
-            if (filename != null)
-            {
-                this.configurationFile = Path.GetFullPath(filename);
-                this.configurationFileWatcher = new FileSystemWatcher();
-                this.configurationFileWatcher.Path = Path.GetDirectoryName(this.configurationFile);
-                this.configurationFileWatcher.Filter = Path.GetFileName(this.configurationFile);
-                this.configurationFileWatcher.NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.Size |
-                                                             NotifyFilters.CreationTime;
-                this.configurationFileWatcher.Changed += this.OnConfigurationFileChanged;
-                this.configurationFileWatcher.EnableRaisingEvents = true;
-                return ReadConfigurationFile(this.configurationFile);
-            }
-
-            singleton.configurationFileData = null;
-            return singleton.ApplyConfiguration();
-        }
-
-        private static bool ReadConfigurationFile(string filename)
-        {
-            Stream file = null;
-            bool success = false;
-            try
-            {
-                file = new FileStream(filename, FileMode.Open, FileAccess.Read);
-                using (var reader = new StreamReader(file))
-                {
-                    file = null;
-                    singleton.configurationFileData = reader.ReadToEnd();
-                    success = singleton.ApplyConfiguration();
-                }
-            }
-            catch (IOException e)
-            {
-                InternalLogger.Write.InvalidConfiguration(string.Format("Could not open configuration: {0} {1}",
-                                                                        e.GetType(), e.Message));
-            }
-            finally
-            {
-                if (file != null)
-                {
-                    file.Dispose();
-                }
-            }
-
-            if (success)
-            {
-                InternalLogger.Write.ProcessedConfigurationFile(filename);
-                ++singleton.configurationFileReloadCount;
-            }
-            else
-            {
-                InternalLogger.Write.InvalidConfigurationFile(filename);
-            }
-            return success;
-        }
-
-        private void OnConfigurationFileChanged(object source, FileSystemEventArgs e)
-        {
-            long writeTime = new FileInfo(e.FullPath).LastWriteTimeUtc.ToFileTimeUtc();
-
-            if (writeTime !=
-                Interlocked.CompareExchange(ref this.configurationFileLastWrite, writeTime,
-                                            this.configurationFileLastWrite))
-            {
-                ReadConfigurationFile(e.FullPath);
+                regexFilters.Add(filter.InnerText);
             }
         }
 
-        private sealed class LogSourceLevels
-        {
-            public readonly EventKeywords Keywords;
-            public readonly EventLevel Level;
-
-            public LogSourceLevels(EventLevel level, EventKeywords keywords)
-            {
-                this.Level = level;
-                this.Keywords = keywords;
-            }
-        }
-
-        /// <summary>
-        /// A small holder for the parsed out logging configuration of a single log
-        /// </summary>
-        private sealed class LogConfiguration
-        {
-            /// <summary>
-            /// The set of capabilities an event logger provides
-            /// </summary>
-            [Flags]
-            public enum Features
-            {
-                None = 0x0,
-                EventSourceSubscription = 0x1,
-                GuidSubscription = 0x2,
-                Unsubscription = 0x4,
-                FileBacked = 0x8,
-                RegexFilter = 0x10
-            }
-
-            public readonly HashSet<string> Filters = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-
-            public readonly Dictionary<Guid, LogSourceLevels> GuidSources =
-                new Dictionary<Guid, LogSourceLevels>();
-
-            public readonly Dictionary<string, LogSourceLevels> NamedSources =
-                new Dictionary<string, LogSourceLevels>(StringComparer.OrdinalIgnoreCase);
-
-            public int BufferSize = DefaultFileBufferSizeMB;
-            public string Directory;
-            public string FilenameTemplate = FileBackedLogger.DefaultFilenameTemplate;
-            public LoggerType FileType = LoggerType.None;
-            public string Hostname = string.Empty;
-            public int Port;
-            public int RotationInterval = -1;
-            public bool TimestampLocal;
-            public long MaximumSizeMB = 0;
-            public TimeSpan MaximumAge = TimeSpan.Zero;
-
-            public bool HasFeature(Features flags)
-            {
-                Features caps;
-                switch (this.FileType)
-                {
-                case LoggerType.Console:
-                case LoggerType.MemoryBuffer:
-                case LoggerType.Network:
-                    caps = (Features.EventSourceSubscription | Features.Unsubscription |
-                            Features.RegexFilter);
-                    break;
-                case LoggerType.TextLogFile:
-                    caps = (Features.EventSourceSubscription | Features.Unsubscription |
-                            Features.FileBacked | Features.RegexFilter);
-                    break;
-                case LoggerType.ETLFile:
-                    caps = (Features.EventSourceSubscription | Features.GuidSubscription | Features.FileBacked);
-                    break;
-                default:
-                    throw new InvalidOperationException("features for type " + this.FileType + " are unknowable");
-                }
-
-                return ((caps & flags) != 0);
-            }
-        }
+        // HEY! HEY YOU! Are you adding stuff here? You're adding stuff, it's cool. Just go update
+        // the 'configuration.md' file in doc with what you've added. Santa will bring you bonus gifts.
+        private const string EtwOverrideXpath = "/loggers/etwlogging";
+        private const string EtwOverrideEnabledAttribute = "enabled";
+        private const string LogTagXpath = "/loggers/log";
+        private const string LogBufferSizeAttribute = "buffersizemb";
+        private const string LogDirectoryAttribute = "directory";
+        private const string LogFilenameTemplateAttribute = "filenametemplate";
+        private const string LogTimestampLocal = "timestamplocal";
+        private const string LogFilterTag = "filter";
+        private const string LogNameAttribute = "name";
+        private const string LogRotationAttribute = "rotationinterval";
+        private const string LogTypeAttribute = "type";
+        private const string LogHostnameAttribute = "hostname";
+        private const string LogPortAttribute = "port";
+        private const string SourceTag = "source";
+        private const string SourceKeywordsAttribute = "keywords";
+        private const string SourceMinSeverityAttribute = "minimumseverity";
+        private const string SourceProviderIDAttribute = "providerid";
+        private const string SourceProviderNameAttribute = "name";
+        #endregion
     }
 }
