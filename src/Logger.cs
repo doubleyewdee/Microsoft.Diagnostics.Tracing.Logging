@@ -679,13 +679,14 @@ namespace Microsoft.Diagnostics.Tracing.Logging
         /// Constructs a manager for a file-backed logger.
         /// </summary>
         /// <param name="configuration">Configuration for the logger.</param>
+        /// <param name="utcStartTime">Start time for log files (UTC).</param>
         /// <remarks>
         /// Callers are expected to call CheckedRotate() periodically to cause file rotation to occur as desired.
         /// If rotationInterval is set to 0 the file will not be rotated and the filename will not contain timestamps.
         /// </remarks>
         [SuppressMessage("Microsoft.Reliability", "CA2000:Dispose objects before losing scope",
             Justification = "We hold the logger internally and so do not want to dispose it")]
-        public FileBackedLogger(LogConfiguration configuration)
+        public FileBackedLogger(LogConfiguration configuration, DateTime utcStartTime)
         {
             this.directoryName = Path.GetFullPath(configuration.Directory);
             if (!Directory.Exists(this.directoryName))
@@ -701,7 +702,7 @@ namespace Microsoft.Diagnostics.Tracing.Logging
             this.maximumAge = configuration.MaximumAge;
             this.maximumSize = configuration.MaximumSize;
 
-            var now = this.AdjustUtcTime(DateTime.UtcNow);
+            var now = this.AdjustUtcTime(utcStartTime);
 
             switch (this.logType)
             {
@@ -723,7 +724,7 @@ namespace Microsoft.Diagnostics.Tracing.Logging
                 this.Logger = new ETLFileLogger(this.baseFilename, this.currentFilename, configuration.BufferSizeMB);
                 break;
             default:
-                throw new ArgumentException("log type " + logType + " not implemented", "logType");
+                throw new ArgumentException($"log type {this.logType} not implemented", nameof(configuration));
             }
 
             this.SetRetentionData();
@@ -886,6 +887,8 @@ namespace Microsoft.Diagnostics.Tracing.Logging
             public long SizeBytes;
         }
 
+        private bool HasRetentionPolicy => this.RotationInterval != 0 && (this.maximumSize != 0 || this.maximumAge > TimeSpan.Zero);
+
         /// <summary>
         /// Adjust the given 'now' value from UTC to local time if we need that.
         /// </summary>
@@ -906,7 +909,7 @@ namespace Microsoft.Diagnostics.Tracing.Logging
             string newFilename;
             if (this.RotationInterval <= 0)
             {
-                this.intervalStart = this.intervalEnd = new DateTime(0);
+                this.intervalStart = this.intervalEnd = DateTime.MinValue;
                 newFilename = this.baseFilename + this.fileExtension;
             }
             else
@@ -926,6 +929,7 @@ namespace Microsoft.Diagnostics.Tracing.Logging
             InternalLogger.Write.UpdateFileRotationTimes(this.baseFilename, this.intervalStart.Ticks,
                                                          this.intervalEnd.Ticks);
         }
+
         private static string CreateFilename(string template, string baseFilename, DateTime start, DateTime end,
                                              string machineName, long millisecondsSinceMidnight)
         {
@@ -946,12 +950,14 @@ namespace Microsoft.Diagnostics.Tracing.Logging
             sequence += (now.Second * 1000) + now.Millisecond;
             return sequence;
         }
+
         private void SetRetentionData()
         {
-            if (this.RotationInterval == 0 || (this.maximumSize == 0 && this.maximumAge == TimeSpan.Zero))
+            if (!this.HasRetentionPolicy)
             {
                 return;
             }
+
             var someFilename = CreateFilename(this.FilenameTemplate, this.baseFilename, DateTime.MinValue,
                                               DateTime.MaxValue, string.Empty, 0);
             var patternLength =
@@ -968,6 +974,11 @@ namespace Microsoft.Diagnostics.Tracing.Logging
 
         private void AddExistingFile(string fullFilename)
         {
+            if (!this.HasRetentionPolicy)
+            {
+                return;
+            }
+
             FileInfo fileInfo;
             try
             {
@@ -996,7 +1007,7 @@ namespace Microsoft.Diagnostics.Tracing.Logging
                 this.oldestFileTimestamp = fileInfo.CreationTimeUtc;
             }
 
-            while (   (this.currentSizeBytes != 0 && this.currentSizeBytes > this.maximumSize)
+            while (   (this.maximumSize != 0 && this.currentSizeBytes > this.maximumSize)
                    || (this.maximumAge != TimeSpan.Zero && this.newestFileTimestamp - this.oldestFileTimestamp > this.maximumAge))
             {
                 // We don't want to expire the only file we currently know about. This can actually violate the user's expectations
@@ -1096,7 +1107,6 @@ namespace Microsoft.Diagnostics.Tracing.Logging
             if (this.outputFile != null)
             {
                 this.Writer.Flush(); // We must flush to get the actual length
-                long size = this.outputFile.Length;
                 string filename = this.outputFile.Name;
 
                 this.Writer.Dispose();
@@ -1105,10 +1115,20 @@ namespace Microsoft.Diagnostics.Tracing.Logging
                 this.outputFile.Close();
                 this.outputFile = null;
 
+                var fileInfo = new FileInfo(filename);
+                long size = fileInfo.Exists ? fileInfo.Length : 0;
                 if (size == 0)
                 {
-                    File.Delete(filename);
-                    InternalLogger.Write.RemovedEmptyFile(filename);
+                    try
+                    {
+                        File.Delete(filename);
+                        InternalLogger.Write.RemovedEmptyFile(filename);
+                    }
+                    // ignore these for now.
+                    catch (Exception e)
+                        when (
+                            e is FileNotFoundException || e is DirectoryNotFoundException ||
+                            e is UnauthorizedAccessException || e is IOException) { }
                 }
 
                 InternalLogger.Write.LoggerDestinationClosed(this.GetType().ToString(), filename);

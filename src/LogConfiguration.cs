@@ -325,9 +325,10 @@ namespace Microsoft.Diagnostics.Tracing.Logging
                 {
                     throw new InvalidConfigurationException("Filename templates are not valid for non-file loggers.");
                 }
-                if (!FileBackedLogger.IsValidFilenameTemplate(value, this.maximumAge))
+                // Validate method will be pickier but user may not have set a rotation interval yet.
+                if (!FileBackedLogger.IsValidFilenameTemplate(value, TimeSpan.Zero))
                 {
-                    throw new InvalidConfigurationException($"Filename template '{value}' is invalid.");
+                    throw new InvalidConfigurationException("Filename template is invalid.");
                 }
 
                 this.filenameTemplate = value;
@@ -498,7 +499,16 @@ namespace Microsoft.Diagnostics.Tracing.Logging
 
             if (this.Type.HasFeature(Features.FileBacked))
             {
-                if ((this.MaximumAge > TimeSpan.Zero || this.MaximumSize > 0) && this.RotationInterval <= 0)
+                if (this.RotationInterval > 0 &&
+                    !FileBackedLogger.IsValidFilenameTemplate(this.FilenameTemplate,
+                                                              TimeSpan.FromSeconds(this.RotationInterval)))
+                {
+                    throw new InvalidConfigurationException(
+                        $"Rotation interval {this.RotationInterval} cannot be used with template {this.FilenameTemplate}.");
+                }
+
+                var retentionPolicySet = (this.MaximumAge > TimeSpan.Zero || this.MaximumSize > 0);
+                if (retentionPolicySet && this.RotationInterval <= 0)
                 {
                     throw new InvalidConfigurationException(
                         $"Log {this.Name} has retention configuration but is not rotated.");
